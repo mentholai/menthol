@@ -29,6 +29,9 @@ pub enum NFTError {
 
     #[error("Invalid prompt: {0}")]
     PromptError(String),
+
+    #[error("Processing error: {0}")]
+    ProcessingError(String),
 }
 
 pub type Result<T> = std::result::Result<T, NFTError>;

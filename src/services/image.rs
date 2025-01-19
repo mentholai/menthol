@@ -1,24 +1,137 @@
 use crate::models::{
-    GenerationConfig,
-    GenerationResult,
-    ImageFormat,
-    NFTError,
-    Result,
-    PerformanceMetrics,
+    GenerationConfig, GenerationResult, NFTError, PerformanceMetrics, Result
 };
 use std::path::PathBuf;
 use std::time::Instant;
-use ort::{Environment, Session, GraphOptimizationLevel, Value, TensorRtExecutionProvider};
+use ort::{Environment, ExecutionProvider, GraphOptimizationLevel, Session, SessionBuilder, Value};
 use tokenizers::Tokenizer;
 use ndarray::{Array4, Array3, Axis};
 use image::{ImageBuffer, Rgb, RgbImage};
-use rand::Rng;
+use rand::{Rng, SeedableRng};
+use crate::models::config::ImageFormat;
 use rand_distr::{Normal, Distribution};
 
 const LATENT_CHANNELS: usize = 4;
 const LATENT_HEIGHT: usize = 64;
 const LATENT_WIDTH: usize = 64;
 const MAX_TEXT_LENGTH: usize = 77;
+
+struct MemoryTracker {
+    start_memory: f64,
+    peak_memory: f64,
+}
+
+impl MemoryTracker {
+    fn new() -> Self {
+        Self {
+            start_memory: 0.0,
+            peak_memory: 0.0,
+        }
+    }
+
+    fn get_peak_memory(&self) -> f64 {
+        self.peak_memory
+    }
+
+    fn get_device_utilization(&self) -> f32 {
+        0.0 // TODO: Implement actual GPU utilization tracking
+    }
+}
+
+struct DiffusionScheduler {
+    timesteps: Vec<f32>,
+    alphas: Vec<f32>,
+    alphas_cumprod: Vec<f32>,
+}
+
+impl DiffusionScheduler {
+    fn new(num_inference_steps: usize) -> Self {
+        // Initialize scheduler parameters
+        let beta_start = 0.00085f32;
+        let beta_end = 0.012f32;
+        let num_train_timesteps = 1000;
+
+        let mut betas = Vec::with_capacity(num_train_timesteps);
+        for i in 0..num_train_timesteps {
+            let beta = beta_start + (beta_end - beta_start) * (i as f32 / num_train_timesteps as f32);
+            betas.push(beta);
+        }
+
+        let alphas: Vec<f32> = betas.iter().map(|beta| 1.0 - beta).collect();
+        let mut alphas_cumprod = Vec::with_capacity(num_train_timesteps);
+        let mut cumprod = 1.0;
+        for alpha in alphas.iter() {
+            cumprod *= alpha;
+            alphas_cumprod.push(cumprod);
+        }
+
+        // Calculate timesteps
+        let step_size = num_train_timesteps / num_inference_steps;
+        let timesteps: Vec<f32> = (0..num_inference_steps)
+            .map(|i| (num_train_timesteps - (i + 1) * step_size) as f32)
+            .collect();
+
+        Self {
+            timesteps,
+            alphas,
+            alphas_cumprod,
+        }
+    }
+
+    fn timesteps(&self) -> &[f32] {
+        &self.timesteps
+    }
+
+    fn step(
+        &self,
+        noise_pred: Array4<f32>,
+        timestep: f32,
+        latents: &Array4<f32>,
+        guidance_scale: f32,
+    ) -> Result<Array4<f32>> {
+        // Split noise prediction for guidance
+        let (noise_pred_uncond, noise_pred_text) = noise_pred.view().split_at(Axis(0), 1);
+        
+        // Perform guidance
+        let noise_pred = &noise_pred_uncond.to_owned() + 
+            guidance_scale * (&noise_pred_text.to_owned() - &noise_pred_uncond.to_owned());
+
+        // Get alpha and beta for current timestep
+        let timestep_index = self.timesteps.iter()
+            .position(|&t| t == timestep)
+            .ok_or_else(|| NFTError::ProcessingError("Invalid timestep".to_string()))?;
+        
+        let alpha = self.alphas[timestep_index];
+        let alpha_prod = self.alphas_cumprod[timestep_index];
+        let beta = 1.0 - alpha;
+
+        // Previous alpha for variance calculation
+        let prev_timestep_index = if timestep_index > 0 { timestep_index - 1 } else { 0 };
+        let alpha_prod_prev = self.alphas_cumprod[prev_timestep_index];
+
+        // Calculate variance
+        let variance = beta * (1.0 - alpha_prod_prev) / (1.0 - alpha_prod);
+        
+        // Predict the mean
+        let pred_original_sample = (latents - variance.sqrt() * &noise_pred) / alpha_prod.sqrt();
+        
+        // Calculate x_t-1
+        let mut prev_sample = alpha_prod_prev.sqrt() * pred_original_sample +
+            variance.sqrt() * &noise_pred;
+
+        if timestep_index > 0 {
+            let mut rng = rand::thread_rng();
+            let normal = rand_distr::Normal::new(0.0, 1.0).unwrap();
+            let noise = Array4::from_shape_fn(
+                prev_sample.raw_dim(),
+                |_| normal.sample(&mut rng) as f32
+            );
+            prev_sample = prev_sample + variance.sqrt() * noise;
+        }
+
+        Ok(prev_sample)
+    }
+}
 
 pub struct ImageService {
     env: Environment,
@@ -32,14 +145,16 @@ pub struct ImageService {
 impl ImageService {
     pub fn new(model_path: PathBuf, output_path: PathBuf) -> Result<Self> {
         // Initialize ONNX Runtime with CUDA support
-        let env = Environment::builder()
-            .with_name("stable_diffusion")
-            .with_execution_providers([
-                "CUDAExecutionProvider",
-                "CPUExecutionProvider"
-            ])
-            .build()
-            .map_err(|e| NFTError::ModelLoadError(e.to_string()))?;
+      // Initialize ONNX Runtime with CUDA support
+// Initialize ONNX Runtime with CUDA support
+    let env = Environment::builder()
+    .with_name("stable_diffusion")
+    .with_execution_providers([
+        ExecutionProvider::CUDA(Default::default()),
+        ExecutionProvider::CPU(Default::default()),
+    ])
+    .build()
+    .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
 
         // Setup paths for each model component
         let text_encoder_path = model_path.join("text_encoder").join("model.onnx");
@@ -52,49 +167,49 @@ impl ImageService {
             return Err(NFTError::ModelLoadError(format!(
                 "Text encoder not found at: {}",
                 text_encoder_path.display()
-            )));
+            ).into()));
         }
         if !unet_path.exists() {
             return Err(NFTError::ModelLoadError(format!(
                 "UNet not found at: {}",
                 unet_path.display()
-            )));
+            ).into()));
         }
         if !vae_decoder_path.exists() {
             return Err(NFTError::ModelLoadError(format!(
                 "VAE decoder not found at: {}",
                 vae_decoder_path.display()
-            )));
+            ).into()));
         }
         if !tokenizer_path.exists() {
             return Err(NFTError::ModelLoadError(format!(
                 "Tokenizer not found at: {}",
                 tokenizer_path.display()
-            )));
+            ).into()));
         }
 
         // Load tokenizer
         let tokenizer = Tokenizer::from_file(&tokenizer_path)
-            .map_err(|e| NFTError::ModelLoadError(format!("Failed to load tokenizer: {}", e)))?;
+            .map_err(|e| NFTError::ModelLoadError(format!("Failed to load tokenizer: {}", e).into()))?;
 
         // Load model components
-        let text_encoder = Session::builder()
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .with_intra_threads(1)
-            .with_model_from_file(&text_encoder_path)
-            .map_err(|e| NFTError::ModelLoadError(format!("Failed to load text encoder: {}", e)))?;
-
-        let unet = Session::builder()
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .with_intra_threads(1)
-            .with_model_from_file(&unet_path)
-            .map_err(|e| NFTError::ModelLoadError(format!("Failed to load UNet: {}", e)))?;
-
-        let vae_decoder = Session::builder()
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .with_intra_threads(1)
-            .with_model_from_file(&vae_decoder_path)
-            .map_err(|e| NFTError::ModelLoadError(format!("Failed to load VAE decoder: {}", e)))?;
+        let text_encoder = SessionBuilder::new(&env)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(1)?
+        .with_model_from_file(&text_encoder_path)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
+    
+    let unet = SessionBuilder::new(&env)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(1)?
+        .with_model_from_file(&unet_path)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
+    
+    let vae_decoder = SessionBuilder::new(&env)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_intra_threads(1)?
+        .with_model_from_file(&vae_decoder_path)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
 
         Ok(Self {
             env,
@@ -105,7 +220,6 @@ impl ImageService {
             output_path,
         })
     }
-}
 
     pub fn generate(&self, config: &GenerationConfig) -> Result<GenerationResult> {
         let start_time = Instant::now();
@@ -153,19 +267,16 @@ impl ImageService {
         let image = self.decode_latents(&latents)?;
 
         // Save image
-        let output_path = self.save_image(image, config.output_config.format)?;
-
-        // Collect metrics
-        let metrics = PerformanceMetrics {
-            generation_time_ms: start_time.elapsed().as_millis() as u64,
-            memory_used_mb: memory_tracker.get_peak_memory(),
-            device_utilization: memory_tracker.get_device_utilization(),
-        };
+        let output_path = self.save_image(&image, config.output_config.format)?;
 
         Ok(GenerationResult {
             image_path: output_path,
             generation_params: config.parameters.clone(),
-            performance_metrics: metrics,
+            performance_metrics: PerformanceMetrics {
+                generation_time_ms: start_time.elapsed().as_millis() as u64,
+                memory_used_mb: memory_tracker.get_peak_memory(),
+                device_utilization: memory_tracker.get_device_utilization(),
+            },
         })
     }
 
@@ -234,37 +345,6 @@ impl ImageService {
         input.mapv_inplace(|x| x / 0.18215);
         Ok(input)
     }
-
-    fn unet_inference(
-        &self,
-        latent_input: &Array4<f32>,
-        text_embeddings: &Array4<f32>,
-        timestep: f32,
-    ) -> Result<Array4<f32>> {
-        // Prepare inputs
-        let latent_input = Value::from_array(self.unet.allocator(), &latent_input)
-            .map_err(|e| NFTError::ProcessingError("Failed to create latent input".to_string()))?;
-
-        let text_embeddings = Value::from_array(self.unet.allocator(), &text_embeddings)
-            .map_err(|e| NFTError::ProcessingError("Failed to create embedding input".to_string()))?;
-
-        let timestep = Value::from_array(
-            self.unet.allocator(),
-            &ndarray::arr0(timestep)
-        ).map_err(|e| NFTError::ProcessingError("Failed to create timestep input".to_string()))?;
-
-        // Run UNet
-        let outputs = self.unet.run(vec![latent_input, timestep, text_embeddings])
-            .map_err(|e| NFTError::ProcessingError("UNet inference failed".to_string()))?;
-
-        // Extract noise prediction
-        let noise_pred = outputs[0].try_extract::<f32>()
-            .map_err(|e| NFTError::ProcessingError("Failed to extract noise prediction".to_string()))?;
-
-        Ok(noise_pred.into_dimensionality()
-            .map_err(|e| NFTError::ProcessingError("Failed to reshape noise prediction".to_string()))?)
-    }
-
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
         // Scale and decode
         let mut scaled_latents = latents.clone();
@@ -305,7 +385,7 @@ impl ImageService {
         Ok(img)
     }
 
-    fn save_image(&self, image: RgbImage, format: ImageFormat) -> Result<PathBuf> {
+    fn save_image(&self, image: &RgbImage, format: ImageFormat) -> Result<PathBuf> {
         // Create output directory if it doesn't exist
         std::fs::create_dir_all(&self.output_path)
             .map_err(|e| NFTError::FileSystemError(e))?;
@@ -333,95 +413,11 @@ impl ImageService {
                     .map_err(|e| NFTError::FileSystemError(e))?;
             },
             ImageFormat::WEBP => {
-                image.save_with_format(&output_path, image::ImageFormat::Webp)
+                image.save_with_format(&output_path, image::ImageFormat::WebP)
                     .map_err(|e| NFTError::FileSystemError(e))?;
             }
         }
 
         Ok(output_path)
-    }
-
-
-struct DiffusionScheduler {
-    timesteps: Vec<f32>,
-    alphas: Vec<f32>,
-    alphas_cumprod: Vec<f32>,
-}
-
-impl DiffusionScheduler {
-    fn timesteps(&self) -> &[f32] {
-        &self.timesteps
-    }
-
-    fn step(
-        &self,
-        noise_pred: Array4<f32>,
-        timestep: f32,
-        latents: &Array4<f32>,
-        guidance_scale: f32,
-    ) -> Result<Array4<f32>> {
-        // Split noise prediction for guidance
-        let (noise_pred_uncond, noise_pred_text) = noise_pred.view().split_at(Axis(0), 1);
-        
-        // Perform guidance
-        let noise_pred = &noise_pred_uncond.to_owned() + 
-            guidance_scale * (&noise_pred_text.to_owned() - &noise_pred_uncond.to_owned());
-
-        // Get alpha and beta for current timestep
-        let timestep_index = self.timesteps.iter()
-            .position(|&t| t == timestep)
-            .ok_or_else(|| NFTError::ProcessingError("Invalid timestep".to_string()))?;
-        
-        let alpha = self.alphas[timestep_index];
-        let alpha_prod = self.alphas_cumprod[timestep_index];
-        let beta = 1.0 - alpha;
-
-        // Previous alpha for variance calculation
-        let prev_timestep_index = if timestep_index > 0 { timestep_index - 1 } else { 0 };
-        let alpha_prod_prev = self.alphas_cumprod[prev_timestep_index];
-
-        // Calculate variance
-        let variance = beta * (1.0 - alpha_prod_prev) / (1.0 - alpha_prod);
-        
-        // Predict the mean
-        let pred_original_sample = (latents - variance.sqrt() * &noise_pred) / alpha_prod.sqrt();
-        
-        // Calculate x_t-1
-        let mut prev_sample = alpha_prod_prev.sqrt() * pred_original_sample +
-            variance.sqrt() * &noise_pred;
-
-        // Add noise if not the final step
-        if timestep_index > 0 {
-            let noise = Array4::random(
-                prev_sample.raw_dim(),
-                rand_distr::Normal::new(0.0, 1.0).unwrap()
-            );
-            prev_sample = prev_sample + variance.sqrt() * noise;
-        }
-
-        Ok(prev_sample)
-    }
-}
-
-// Memory tracking helper
-struct MemoryTracker {
-    start_memory: f64,
-    peak_memory: f64,
-}
-
-impl MemoryTracker {
-    fn new() -> Self {
-        Self {
-            start_memory: 0.0,
-            peak_memory: 0.0,
-        }
-    }
-
-    fn get_peak_memory(&self) -> f64 {
-        self.peak_memory
-    }
-
-    fn get_device_utilization(&self) -> f32 {
-        0.0 // TODO: Implement actual GPU utilization tracking
     }
 }

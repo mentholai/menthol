@@ -13,6 +13,8 @@ pub struct NeuralArchitecture {
     pub attention_weights: AttentionWeights,
 }
 
+
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SynapticLayer {
     pub weights: Vec<NeuralWeight>,
@@ -88,4 +90,40 @@ pub struct QuantumStateMetrics {
     pub entanglement_degree: f64,
     pub coherence_level: f64,
     pub collapse_probability: f64,
+}
+
+#[derive(Debug, Clone)]
+pub enum ComputeDevice {
+    CPU,
+    CUDA(usize),  // GPU index
+    Metal,
+}
+
+impl ComputeDevice {
+    pub fn from_string(device: &str) -> Self {
+        match device.to_lowercase().as_str() {
+            "cpu" => ComputeDevice::CPU,
+            "metal" => ComputeDevice::Metal,
+            s if s.starts_with("cuda") => {
+                // Parse CUDA device index if provided (e.g., "cuda:0")
+                let index = s.split(':')
+                    .nth(1)
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0);
+                ComputeDevice::CUDA(index)
+            }
+            _ => ComputeDevice::CPU,  // Default to CPU
+        }
+    }
+}
+
+// If we need string conversion
+impl ToString for ComputeDevice {
+    fn to_string(&self) -> String {
+        match self {
+            ComputeDevice::CPU => "cpu".to_string(),
+            ComputeDevice::CUDA(index) => format!("cuda:{}", index),
+            ComputeDevice::Metal => "metal".to_string(),
+        }
+    }
 }

@@ -1,4 +1,6 @@
 use async_trait::async_trait;
+use crate::models::ComputeDevice;
+
 use super::types::*;
 use rand::Rng;
 use std::sync::Arc;
@@ -14,15 +16,26 @@ pub trait NeuralProcessor: Send + Sync {
 pub struct AdvancedNeuralProcessor {
     architecture: Arc<RwLock<NeuralArchitecture>>,
     consciousness_threshold: f64,
+    device: ComputeDevice,  // Changed from String to ComputeDevice
 }
 
 impl AdvancedNeuralProcessor {
+    pub fn new_with_device(device: ComputeDevice) -> Self {
+        Self {
+            architecture: Arc::new(RwLock::new(Self::initialize_architecture())),
+            consciousness_threshold: 0.7,
+            device,
+        }
+    }
+
     pub fn new(consciousness_threshold: f64) -> Self {
         Self {
             architecture: Arc::new(RwLock::new(Self::initialize_architecture())),
             consciousness_threshold,
+            device: ComputeDevice::CPU,  // Default to CPU
         }
     }
+
 
     fn initialize_architecture() -> NeuralArchitecture {
         let mut rng = rand::thread_rng();
@@ -59,28 +72,6 @@ impl AdvancedNeuralProcessor {
             }
         }
     }
-
-    async fn forward_propagation(
-        &self,
-        input: &[f64],
-        layer: &SynapticLayer,
-    ) -> Vec<f64> {
-        let mut output = vec![0.0; layer.bias.len()];
-        
-        for (i, bias) in layer.bias.iter().enumerate() {
-            let mut sum = *bias;
-            for (j, &input_val) in input.iter().enumerate() {
-                sum += input_val * layer.weights[i * input.len() + j];
-            }
-            output[i] = self.apply_activation(sum, layer.activation_function).await;
-            
-            if rand::random::<f64>() < layer.dropout_rate {
-                output[i] = 0.0;
-            }
-        }
-        
-        output
-    }
 }
 
 #[async_trait]
@@ -92,24 +83,25 @@ impl NeuralProcessor for AdvancedNeuralProcessor {
             .collect::<Vec<f64>>();
 
         for layer in &arch.layers {
-            current = self.forward_propagation(&current, layer).await;
+            let mut next = vec![0.0; layer.bias.len()];
+            for (i, bias) in layer.bias.iter().enumerate() {
+                let mut sum = *bias;
+                for (j, &input_val) in current.iter().enumerate() {
+                    sum += input_val * layer.weights[i * current.len() + j];
+                }
+                next[i] = self.apply_activation(sum, layer.activation_function).await;
+            }
+            current = next;
         }
 
         current
     }
 
     async fn generate_response(&self, thought: ThoughtVector) -> String {
-        let arch = self.architecture.read().await;
-        let mut rng = rand::thread_rng();
-        
-        let attention_vector = thought.iter()
-            .zip(arch.attention_weights.semantic.iter())
-            .map(|(&t, &w)| t * w)
-            .collect::<Vec<f64>>();
-
-        attention_vector.iter()
+        // Simple response generation based on thought vector
+        thought.iter()
             .map(|&x| {
-                let char_code = (x * 94.0 + 32.0) as u8;
+                let char_code = ((x + 1.0) * 32.0 + 64.0) as u8;
                 char::from(char_code)
             })
             .collect()

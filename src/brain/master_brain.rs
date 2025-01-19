@@ -2,7 +2,7 @@ use super::{
     neural::AdvancedNeuralProcessor, processing::{ConsciousnessProcessor, ImageProcessor, TextProcessor}, quantum::QuantumProcessor
 };
 use crate::models::{
-    ComputeConfig, GenerationResult, NFTDefaults, NFTError, PerformanceMetrics, Result, SystemConfig, NFT
+    ComputeConfig, ComputeDevice, GenerationParameters, GenerationResult, NFTAttribute, NFTCollection, NFTCreator, NFTDefaults, NFTError, NFTFile, NFTMetadata, NFTProperties, PerformanceMetrics, PreferredDevice, Result, SystemConfig, NFT
 };
 use std::sync::Arc;
 use std::path::PathBuf;
@@ -31,15 +31,17 @@ impl MasterBrain {
             config,
         }
     }
+    
 
-    fn determine_compute_device(compute_config: &ComputeConfig) -> String {
+    fn determine_compute_device(compute_config: &ComputeConfig) -> ComputeDevice {
         if compute_config.cuda_enabled && compute_config.gpu_indices.is_some() {
-            return "cuda".to_string();
+            let index = compute_config.gpu_indices.as_ref().unwrap()[0];
+            ComputeDevice::CUDA(index)
+        } else if compute_config.metal_enabled {
+            ComputeDevice::Metal
+        } else {
+            ComputeDevice::CPU
         }
-        if compute_config.metal_enabled {
-            return "metal".to_string();
-        }
-        "cpu".to_string()
     }
 
     pub fn generate_nft(
