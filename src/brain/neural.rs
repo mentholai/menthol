@@ -16,7 +16,7 @@ pub trait NeuralProcessor: Send + Sync {
 pub struct AdvancedNeuralProcessor {
     architecture: Arc<RwLock<NeuralArchitecture>>,
     consciousness_threshold: f64,
-    device: ComputeDevice,  // Changed from String to ComputeDevice
+    device: ComputeDevice,   
 }
 
 impl AdvancedNeuralProcessor {
@@ -32,7 +32,7 @@ impl AdvancedNeuralProcessor {
         Self {
             architecture: Arc::new(RwLock::new(Self::initialize_architecture())),
             consciousness_threshold,
-            device: ComputeDevice::CPU,  // Default to CPU
+            device: ComputeDevice::CPU, 
         }
     }
 
@@ -98,7 +98,6 @@ impl NeuralProcessor for AdvancedNeuralProcessor {
     }
 
     async fn generate_response(&self, thought: ThoughtVector) -> String {
-        // Simple response generation based on thought vector
         thought.iter()
             .map(|&x| {
                 let char_code = ((x + 1.0) * 32.0 + 64.0) as u8;

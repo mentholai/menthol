@@ -58,23 +58,28 @@ impl ModelService {
     fn manage_memory(&mut self) -> Result<()> {
         const MAX_MEMORY_USAGE: usize = 8 * 1024 * 1024 * 1024; // 8GB
         
+        // First collect total usage
         let total_usage: usize = self.models.values()
             .map(|m| m.memory_usage)
             .sum();
-
+    
         if total_usage > MAX_MEMORY_USAGE {
-            // Find least recently used models and unload them
-            let mut models: Vec<_> = self.models.iter().collect();
-            models.sort_by_key(|(_, m)| m.last_used);
+            let mut models: Vec<(String, std::time::SystemTime)> = self.models
+                .iter()
+                .map(|(name, model)| (name.clone(), model.last_used))
+                .collect();
+            
+            models.sort_by_key(|(_, last_used)| *last_used);
 
-            while self.models.values().map(|m| m.memory_usage).sum::<usize>() > MAX_MEMORY_USAGE {
-                if let Some((name, _)) = models.first() {
-                    self.models.remove(*name);
+            for (name, _) in models {
+                let current_usage: usize = self.models.values().map(|m| m.memory_usage).sum();
+                if current_usage <= MAX_MEMORY_USAGE {
+                    break;
                 }
-                models.remove(0);
+                self.models.remove(&name);
             }
         }
-
+    
         Ok(())
     }
 

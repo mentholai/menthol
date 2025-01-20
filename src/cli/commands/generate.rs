@@ -6,6 +6,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::PathBuf;
 
+///////////////BROKEN PLEASE FIX ME FOR IMAGE GEN TESTING/////////////
 #[derive(Parser)]
 pub struct GenerateArgs {
     /// The prompt to generate an image from

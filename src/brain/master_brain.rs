@@ -1,10 +1,11 @@
 use super::{
-    neural::AdvancedNeuralProcessor, processing::{ConsciousnessProcessor, ImageProcessor, TextProcessor}, quantum::QuantumProcessor
+    neural::AdvancedNeuralProcessor,
+    processing::ImageProcessor,
+    quantum::QuantumProcessor, ConsciousnessProcessor, TextProcessor,
 };
 use crate::models::{
-    ComputeConfig, ComputeDevice, GenerationParameters, GenerationResult, NFTAttribute, NFTCollection, NFTCreator, NFTDefaults, NFTError, NFTFile, NFTMetadata, NFTProperties, PerformanceMetrics, PreferredDevice, Result, SystemConfig, NFT
+    ComputeConfig, ComputeDevice, GenerationParameters, GenerationResult, NFTAttribute, NFTCollection, NFTCreator, NFTDefaults, NFTError, NFTFile, NFTMetadata, NFTProperties, PerformanceMetrics, Result, SystemConfig, NFT
 };
-use std::sync::Arc;
 use std::path::PathBuf;
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -18,19 +19,20 @@ pub struct MasterBrain {
 }
 
 impl MasterBrain {
-    pub fn new(config: SystemConfig) -> Self {
+    pub fn new(config: SystemConfig) -> Result<Self> {
         // Initialize with specific device
         let device = Self::determine_compute_device(&config.resources.compute);
 
-        Self {
+        Ok(Self {
             neural_processor: AdvancedNeuralProcessor::new_with_device(device.clone()),
             quantum_processor: QuantumProcessor::new_with_device(device.clone()),
-            image_processor: ImageProcessor::new_with_device(device.clone()),
+            image_processor: ImageProcessor::new_with_device(device.clone())?,  // Note the ? operator
             text_processor: TextProcessor::new(512),
             consciousness_processor: ConsciousnessProcessor::new(0.7),
             config,
-        }
+        })
     }
+
     
 
     fn determine_compute_device(compute_config: &ComputeConfig) -> ComputeDevice {
@@ -88,7 +90,7 @@ impl MasterBrain {
         Ok(result)
     }
 
-    fn generate_metadata(&self, prompt: &str, image_result: &ImageResult) -> Result<NFT> {
+    fn generate_metadata(&self, prompt: &str, result: &GenerationResult) -> Result<NFT> {
         // Create NFT metadata using config defaults
         let defaults = &self.config.generation.nft;
         
@@ -96,18 +98,18 @@ impl MasterBrain {
             name: self.generate_name(prompt)?,
             symbol: defaults.symbol.clone(),
             description: self.generate_description(prompt)?,
-            image_uri: image_result.path.to_string_lossy().to_string(),
+            image_uri: result.image_path.to_string_lossy().to_string(),
             attributes: self.generate_attributes(prompt)?,
             collection: NFTCollection {
                 name: defaults.collection_name.clone(),
                 family: defaults.collection_name.clone(),
                 collection_id: uuid::Uuid::new_v4().to_string(),
             },
-            metadata: self.generate_technical_metadata(image_result, defaults)?,
+            metadata: self.generate_technical_metadata(result, defaults)?,
         })
     }
 
-    fn generate_name(&self, prompt: &str) -> Result<String> {
+    fn generate_name(&self, _prompt: &str) -> Result<String> {
         // TODO: Implement name generation
         Ok(format!("NFT #{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap()))
     }
@@ -117,17 +119,17 @@ impl MasterBrain {
         Ok(prompt.to_string())
     }
 
-    fn generate_attributes(&self, prompt: &str) -> Result<Vec<NFTAttribute>> {
+    fn generate_attributes(&self, _prompt: &str) -> Result<Vec<NFTAttribute>> {
         // TODO: Implement attribute generation
         Ok(vec![])
     }
 
-    fn generate_technical_metadata(&self, image_result: &ImageResult, defaults: &NFTDefaults) -> Result<NFTMetadata> {
+    fn generate_technical_metadata(&self, result: &GenerationResult, defaults: &NFTDefaults) -> Result<NFTMetadata> {
         Ok(NFTMetadata {
             seller_fee_basis_points: defaults.seller_fee_basis_points,
             creation_date: chrono::Utc::now().to_rfc3339(),
             files: vec![NFTFile {
-                uri: image_result.path.to_string_lossy().to_string(),
+                uri: result.image_path.to_string_lossy().to_string(),
                 file_type: "image/png".to_string(),
             }],
             properties: NFTProperties {
@@ -140,17 +142,11 @@ impl MasterBrain {
         })
     }
 
-    fn save_generation(&self, image_result: ImageResult, metadata: NFT) -> Result<GenerationResult> {
+    fn save_generation(&self, result: GenerationResult, metadata: NFT) -> Result<GenerationResult> {
         // Save image and metadata to configured paths
         let output_dir = &self.config.storage.output_dir;
         std::fs::create_dir_all(output_dir)
             .map_err(|e| NFTError::FileSystemError(e))?;
-
-        let result = GenerationResult {
-            image_path: image_result.path,
-            generation_params: image_result.params,
-            performance_metrics: self.collect_performance_metrics(),
-        };
 
         // Save metadata
         let metadata_path = output_dir.join("metadata.json");

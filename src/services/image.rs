@@ -1,14 +1,14 @@
 use crate::models::{
-    GenerationConfig, GenerationResult, NFTError, PerformanceMetrics, Result
+    GenerationConfig, GenerationResult, ImageFormat, NFTError, PerformanceMetrics, Result
 };
-use std::path::PathBuf;
+use std::{path::PathBuf};
 use std::time::Instant;
-use ort::{Environment, ExecutionProvider, GraphOptimizationLevel, Session, SessionBuilder, Value};
+use ort::{tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session, SessionBuilder, Value};
 use tokenizers::Tokenizer;
-use ndarray::{Array4, Array3, Axis};
-use image::{ImageBuffer, Rgb, RgbImage};
-use rand::{Rng, SeedableRng};
-use crate::models::config::ImageFormat;
+use ndarray::{Array, Array0, Array4, Axis, CowArray, IxDyn};
+use std::sync::Arc;
+use image::{Rgb, RgbImage};
+use rand::{SeedableRng};
 use rand_distr::{Normal, Distribution};
 
 const LATENT_CHANNELS: usize = 4;
@@ -134,27 +134,78 @@ impl DiffusionScheduler {
 }
 
 pub struct ImageService {
-    env: Environment,
+    env: Arc<Environment>,
     text_encoder: Session,
     unet: Session,
     vae_decoder: Session,
     tokenizer: Tokenizer,
-    output_path: PathBuf,
+    output_path: PathBuf, 
+    timestep_tensor_owned: Option<Array<f32, IxDyn>>, 
 }
 
 impl ImageService {
+    fn unet_inference(
+        &self,
+        latent_input: &Array4<f32>,
+        text_embeddings: &Array4<f32>,
+        timestep: f32,
+    ) -> Result<Array4<f32>> {
+        // Convert arrays to dynamic dimension and store them
+        let latent_input_dyn = latent_input.clone().into_dyn();
+        let text_embeddings_dyn = text_embeddings.clone().into_dyn();
+        let timestep_array = Array0::from_elem((), timestep).into_dyn();
+        
+        // Create and store CowArrays
+        let latent_cow = CowArray::from(&latent_input_dyn);
+        let text_cow = CowArray::from(&text_embeddings_dyn);
+        let timestep_cow = CowArray::from(&timestep_array);
+        
+        // Create all tensors
+        let input_tensors = {
+            let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
+                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet input tensor: {}", e)))?;
+    
+            let text_tensor = Value::from_array(self.unet.allocator(), &text_cow)
+                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet text input tensor: {}", e)))?;
+    
+            let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
+                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
+    
+            vec![latent_tensor, text_tensor, timestep_tensor]
+        };
+    
+        // Run model with all tensors
+        let outputs = self.unet.run(input_tensors)
+            .map_err(|e| NFTError::ProcessingError(format!("UNet inference failed: {}", e)))?;
+    
+        // Extract and convert result
+        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
+            .try_extract()
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to extract UNet output: {}", e)))?;
+        
+        let shape = (
+            latent_input.shape()[0],
+            latent_input.shape()[1],
+            latent_input.shape()[2],
+            latent_input.shape()[3],
+        );
+        
+        let noise_pred_array = Array::from_iter(extracted_tensor.view().iter().copied())
+            .into_shape(shape)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape UNet output: {}", e)))?;
+    
+        Ok(noise_pred_array)
+    }
     pub fn new(model_path: PathBuf, output_path: PathBuf) -> Result<Self> {
-        // Initialize ONNX Runtime with CUDA support
-      // Initialize ONNX Runtime with CUDA support
-// Initialize ONNX Runtime with CUDA support
-    let env = Environment::builder()
+
+    let env = Arc::new(Environment::builder()
     .with_name("stable_diffusion")
     .with_execution_providers([
         ExecutionProvider::CUDA(Default::default()),
         ExecutionProvider::CPU(Default::default()),
     ])
     .build()
-    .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
+    .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?);
 
         // Setup paths for each model component
         let text_encoder_path = model_path.join("text_encoder").join("model.onnx");
@@ -193,23 +244,33 @@ impl ImageService {
             .map_err(|e| NFTError::ModelLoadError(format!("Failed to load tokenizer: {}", e).into()))?;
 
         // Load model components
-        let text_encoder = SessionBuilder::new(&env)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(1)?
+        let text_encoder = SessionBuilder::new(&env)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))? 
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
+        .with_intra_threads(1)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
         .with_model_from_file(&text_encoder_path)
         .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
     
-    let unet = SessionBuilder::new(&env)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(1)?
+    let unet = SessionBuilder::new(&env)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
+        .with_intra_threads(1)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
         .with_model_from_file(&unet_path)
         .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
     
-    let vae_decoder = SessionBuilder::new(&env)?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(1)?
+    let vae_decoder = SessionBuilder::new(&env)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
+        .with_intra_threads(1)
+        .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?
         .with_model_from_file(&vae_decoder_path)
         .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?;
+    
 
         Ok(Self {
             env,
@@ -217,7 +278,8 @@ impl ImageService {
             unet,
             vae_decoder,
             tokenizer,
-            output_path,
+            output_path,  
+            timestep_tensor_owned: None,
         })
     }
 
@@ -233,17 +295,17 @@ impl ImageService {
 
         // Initialize latents
         let mut latents = self.initialize_latents(
-            config.parameters.batch_size,
+            1,
             config.parameters.seed
         )?;
 
         // Setup scheduler
-        let mut scheduler = DiffusionScheduler::new(
+        let scheduler = DiffusionScheduler::new(
             config.parameters.num_inference_steps as usize
         );
 
         // Diffusion process
-        for (timestep_index, timestep) in scheduler.timesteps().iter().enumerate() {
+        for (_timestep_index, timestep) in scheduler.timesteps().iter().enumerate() {
             // Prepare latent input
             let latent_input = self.prepare_latent_input(&latents, *timestep)?;
 
@@ -267,7 +329,7 @@ impl ImageService {
         let image = self.decode_latents(&latents)?;
 
         // Save image
-        let output_path = self.save_image(&image, config.output_config.format)?;
+        let output_path = self.save_image(&image, config.output_config.format.clone())?;
 
         Ok(GenerationResult {
             image_path: output_path,
@@ -283,37 +345,43 @@ impl ImageService {
     fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array4<f32>> {
         // Tokenize prompts
         let tokens = self.tokenizer.encode(prompt, true)
-            .map_err(|e| NFTError::ProcessingError("Tokenization failed".to_string()))?;
+            .map_err(|_e| NFTError::ProcessingError("Tokenization failed".to_string()))?;
         let neg_tokens = self.tokenizer.encode(negative_prompt, true)
-            .map_err(|e| NFTError::ProcessingError("Negative tokenization failed".to_string()))?;
-
+            .map_err(|_e| NFTError::ProcessingError("Negative tokenization failed".to_string()))?;
+    
         // Convert to tensors
         let mut input_ids = vec![0; MAX_TEXT_LENGTH];
         let mut neg_input_ids = vec![0; MAX_TEXT_LENGTH];
-
+    
         // Copy and pad tokens
         input_ids[..tokens.get_ids().len()].copy_from_slice(tokens.get_ids());
         neg_input_ids[..neg_tokens.get_ids().len()].copy_from_slice(neg_tokens.get_ids());
-
-        // Create input tensor
+    
+        // Create input tensor and convert to dynamic form
         let input_tensor = ndarray::Array2::from_shape_vec(
             (2, MAX_TEXT_LENGTH),
             [&neg_input_ids[..], &input_ids[..]].concat()
-        ).map_err(|e| NFTError::ProcessingError("Failed to create input tensor".to_string()))?;
-
+        ).map_err(|_e| NFTError::ProcessingError("Failed to create input tensor".to_string()))?;
+        
+        // Convert to dynamic dimensions and create CowArray
+        let input_tensor_dyn = input_tensor.into_dyn();
+        let input_tensor_cow = CowArray::from(&input_tensor_dyn);
+    
         // Run text encoder
-        let input = Value::from_array(self.text_encoder.allocator(), &input_tensor)
-            .map_err(|e| NFTError::ProcessingError("Failed to create input value".to_string()))?;
-
+        let input = Value::from_array(self.text_encoder.allocator(), &input_tensor_cow)
+            .map_err(|_e| NFTError::ProcessingError("Failed to create input value".to_string()))?;
+    
         let outputs = self.text_encoder.run(vec![input])
-            .map_err(|e| NFTError::ProcessingError("Text encoder inference failed".to_string()))?;
+            .map_err(|_e| NFTError::ProcessingError("Text encoder inference failed".to_string()))?;
 
-        // Convert output to ndarray
-        let embeddings = outputs[0].try_extract::<f32>()
-            .map_err(|e| NFTError::ProcessingError("Failed to extract embeddings".to_string()))?;
-
-        Ok(embeddings.into_dimensionality()
-            .map_err(|e| NFTError::ProcessingError("Failed to reshape embeddings".to_string()))?)
+        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
+            .try_extract()
+            .map_err(|_e| NFTError::ProcessingError("Failed to extract embeddings".to_string()))?;
+        
+        let shape = (2, 77, 768, 1); 
+        Array::from_iter(extracted_tensor.view().iter().copied())
+            .into_shape(shape)
+            .map_err(|_e| NFTError::ProcessingError("Failed to reshape embeddings".to_string()))
     }
 
     fn initialize_latents(&self, batch_size: usize, seed: Option<u64>) -> Result<Array4<f32>> {
@@ -323,7 +391,7 @@ impl ImageService {
         };
 
         let normal = Normal::new(0.0, 1.0)
-            .map_err(|e| NFTError::ProcessingError("Failed to create normal distribution".to_string()))?;
+            .map_err(|_e| NFTError::ProcessingError("Failed to create normal distribution".to_string()))?;
 
         let shape = [
             batch_size,
@@ -340,7 +408,7 @@ impl ImageService {
         Ok(latents)
     }
 
-    fn prepare_latent_input(&self, latents: &Array4<f32>, timestep: f32) -> Result<Array4<f32>> {
+    fn prepare_latent_input(&self, latents: &Array4<f32>, _timestep: f32) -> Result<Array4<f32>> {
         let mut input = latents.clone();
         input.mapv_inplace(|x| x / 0.18215);
         Ok(input)
@@ -349,22 +417,32 @@ impl ImageService {
         // Scale and decode
         let mut scaled_latents = latents.clone();
         scaled_latents.mapv_inplace(|x| 1.0 / 0.18215 * x);
-
+    
+        // Convert to dynamic dimensions and create CowArray
+        let scaled_latents_dyn = scaled_latents.into_dyn();
+        let scaled_latents_cow = CowArray::from(&scaled_latents_dyn);
+    
         // Prepare VAE input
-        let vae_input = Value::from_array(self.vae_decoder.allocator(), &scaled_latents)
-            .map_err(|e| NFTError::ProcessingError("Failed to create VAE input".to_string()))?;
-
+        let vae_input = Value::from_array(self.vae_decoder.allocator(), &scaled_latents_cow)
+            .map_err(|_e| NFTError::ProcessingError("Failed to create VAE input".to_string()))?;
+    
         // Run VAE decoder
         let outputs = self.vae_decoder.run(vec![vae_input])
-            .map_err(|e| NFTError::ProcessingError("VAE decoding failed".to_string()))?;
-
+            .map_err(|_e| NFTError::ProcessingError("VAE decoding failed".to_string()))?;
+    
         // Extract image
-        let image_array = outputs[0].try_extract::<f32>()
-            .map_err(|e| NFTError::ProcessingError("Failed to extract decoded image".to_string()))?;
-
+        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
+            .try_extract()
+            .map_err(|_e| NFTError::ProcessingError("Failed to extract decoded image".to_string()))?;
+    
+        // Convert to Array4 with correct shape
+        let shape = (1, 3, 512, 512); 
+        let image_array = Array::from_iter(extracted_tensor.view().iter().copied())
+            .into_shape(shape)
+            .map_err(|_e| NFTError::ProcessingError("Failed to reshape decoded image".to_string()))?;
+    
         // Convert to RGB image
-        self.array_to_image(&image_array.into_dimensionality()
-            .map_err(|e| NFTError::ProcessingError("Failed to reshape decoded image".to_string()))?)
+        self.array_to_image(&image_array)
     }
 
     fn array_to_image(&self, array: &Array4<f32>) -> Result<RgbImage> {
@@ -406,18 +484,54 @@ impl ImageService {
         match format {
             ImageFormat::PNG => {
                 image.save_with_format(&output_path, image::ImageFormat::Png)
-                    .map_err(|e| NFTError::FileSystemError(e))?;
+                    .map_err(|e| NFTError::FileSystemError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             },
             ImageFormat::JPEG => {
                 image.save_with_format(&output_path, image::ImageFormat::Jpeg)
-                    .map_err(|e| NFTError::FileSystemError(e))?;
+                    .map_err(|e| NFTError::FileSystemError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             },
             ImageFormat::WEBP => {
                 image.save_with_format(&output_path, image::ImageFormat::WebP)
-                    .map_err(|e| NFTError::FileSystemError(e))?;
+                    .map_err(|e| NFTError::FileSystemError(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
             }
         }
 
         Ok(output_path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_initialize_latents() {
+        let service = create_test_service();
+        let latents = service.initialize_latents(1, Some(42)).unwrap();
+        assert_eq!(latents.shape(), &[1, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH]);
+    }
+
+    #[test]
+    fn test_prepare_latent_input() {
+        let service = create_test_service();
+        let input = Array4::<f32>::zeros((1, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH));
+        let scaled = service.prepare_latent_input(&input, 0.0).unwrap();
+        assert_eq!(scaled.shape(), input.shape());
+    }
+
+    #[test]
+    fn test_array_to_image() {
+        let service = create_test_service();
+        let array = Array4::<f32>::zeros((1, 3, 512, 512));
+        let image = service.array_to_image(&array).unwrap();
+        assert_eq!(image.dimensions(), (512, 512));
+    }
+
+    // Helper function to create a test instance
+    fn create_test_service() -> ImageService {
+        ImageService::new(
+            PathBuf::from("test_models"),
+            PathBuf::from("test_output")
+        ).unwrap()
     }
 }

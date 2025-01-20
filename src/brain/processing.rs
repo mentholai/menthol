@@ -4,11 +4,31 @@ use super::types::*;
 use std::path::PathBuf;
 use rand::Rng;
 
+struct NoiseGenerator {
+    seed: u64,
+}
+
 pub struct ImageProcessor {
     style_params: ImageGenerationParams,
     noise_generator: NoiseGenerator,
     image_service: ImageService,
     output_path: PathBuf,
+    device: ComputeDevice,  
+}
+impl NoiseGenerator {
+    fn new() -> Self {
+        Self {
+            seed: rand::random(),
+        }
+    }
+
+    fn apply_noise(&self, params: &mut NoiseParameters) {
+        let mut rng = rand::thread_rng();
+        
+        params.frequency *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
+        params.amplitude *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
+        params.persistence = (params.persistence + rng.gen::<f64>()) / 2.0;
+    }
 }
 
 impl ImageProcessor {
@@ -19,15 +39,17 @@ impl ImageProcessor {
             noise_generator: NoiseGenerator::new(),
             image_service: ImageService::new(PathBuf::from("models"), output_path.clone())?,
             output_path,
+            device,  
         })
     }
 
     pub fn generate(&mut self, thought_vector: &ThoughtVector) -> Result<GenerationResult> {
-        // Convert thought vector into generation parameters
         let params = self.process_thought_vector(thought_vector);
         
         // Create generation config
         let config = GenerationConfig {
+            model_path: PathBuf::from("models"),
+            device: self.device.clone(),  // Use stored device
             parameters: params.into_generation_parameters(),
             output_config: OutputConfig {
                 output_dir: self.output_path.clone(),
@@ -40,7 +62,7 @@ impl ImageProcessor {
     }
 
     fn initialize_style_params() -> ImageGenerationParams {
-        let mut rng = rand::thread_rng();
+        let _rng = rand::thread_rng();
         
         ImageGenerationParams {
             style_vector: vec![
@@ -124,8 +146,7 @@ impl ImageGenerationParams {
             height: 512,
             num_inference_steps: 30,
             guidance_scale: 7.5,
-            seed: Some(rand::random()),
-            batch_size: 1,
+            seed: Some(rand::random())
         }
     }
 }

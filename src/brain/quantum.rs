@@ -1,4 +1,4 @@
-use crate::models::{Result, NFTError, ComputeDevice};
+use crate::models::{Result, ComputeDevice};
 use super::types::ThoughtVector;
 use rand::Rng;
 use std::sync::Arc;
