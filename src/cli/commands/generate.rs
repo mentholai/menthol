@@ -1,120 +1,68 @@
 use crate::{
-    models::{GenerationConfig, ImageFormat, Result},
-    services::ImageService,
+    brain::master_brain::MasterBrain,
+    models::{Result, SystemConfig, NFTError},
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
+use std::fs;
 use std::path::PathBuf;
 
-///////////////BROKEN PLEASE FIX ME FOR IMAGE GEN TESTING/////////////
+/// Command-line arguments for generating an image
 #[derive(Parser)]
 pub struct GenerateArgs {
     /// The prompt to generate an image from
     #[arg(short, long)]
     prompt: String,
 
-    /// Optional negative prompt
-    #[arg(short, long)]
-    negative_prompt: Option<String>,
-
-    /// Number of inference steps (default: 50)
-    #[arg(short, long, default_value = "50")]
-    steps: u32,
-
-    /// Guidance scale (default: 7.5)
-    #[arg(short = 'g', long, default_value = "7.5")]
-    guidance_scale: f32,
-
-    /// Image width (default: 512)
-    #[arg(short = 'W', long, default_value = "512")]
-    width: u32,
-
-    /// Image height (default: 512)
-    #[arg(short = 'H', long, default_value = "512")]
-    height: u32,
-
-    /// Random seed (optional)
-    #[arg(short, long)]
-    seed: Option<u64>,
-
     /// Output directory (default: ./output)
     #[arg(short, long, default_value = "./output")]
     output_dir: PathBuf,
 
-    /// Model directory containing ONNX models
-    #[arg(short, long, default_value = "./models")]
-    model_dir: PathBuf,
+    /// Config file path (default: ./config.json)
+    #[arg(short, long, default_value = "./config.json")]
+    config_path: PathBuf,
 }
 
 impl GenerateArgs {
-    pub fn execute(&self) -> Result<()> {
+    pub fn execute(&self, master_brain: &mut MasterBrain) -> Result<()> {
         // Initialize progress bar
         let pb = ProgressBar::new(100);
         pb.set_style(
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}")
-                .unwrap()
+                .unwrap(),
         );
-        pb.set_message("Initializing...");
+        pb.set_message("Loading system configuration...");
 
-        // Initialize image service
-        let image_service = ImageService::new(
-            self.model_dir.clone(),
-            self.output_dir.clone(),
-        )?;
+        // Load system configuration
+        let config = SystemConfig::load(self.config_path.to_str().unwrap())
+            .map_err(|e| NFTError::ConfigurationError(format!("Failed to load config: {}", e)))?;
 
-        pb.set_message("Creating generation config...");
         pb.inc(10);
+        pb.set_message("Initializing MasterBrain...");
 
-        // Create generation config
-        fn create_config(&self) -> GenerationConfig {
-            GenerationConfig {
-                model_path: self.model_dir.clone(),
-                device: ComputeDevice::CUDA(0),
-                parameters: self.create_generation_parameters(),
-                output_config: self.create_output_config(),
-            }
-        }
+        // Initialize MasterBrain
+        let mut master_brain = MasterBrain::new(config)?;
 
-        pb.set_message("Generating image...");
         pb.inc(10);
+        pb.set_message("Starting image generation...");
 
-        // Generate the image
-        let result = image_service.generate(&config)?;
+        // Generate NFT (image + metadata)
+        let result = master_brain.generate_nft(self.prompt.clone(), Some(pb.clone()))?;
 
-        pb.set_message("Image generation complete!");
+        pb.set_message("Saving generated image...");
+        fs::create_dir_all(&self.output_dir)
+            .map_err(|e| NFTError::FileSystemError(e))?;
+
+        let output_path = self.output_dir.join("generated_nft.png");
+        fs::copy(&result.image_path, &output_path)
+            .map_err(|e| NFTError::FileSystemError(e))?;
+
         pb.finish_with_message(format!(
-            "Generated image saved to: {}",
-            result.image_path.display()
+            "✅ Image successfully generated: {}",
+            output_path.display()
         ));
 
-        // Print performance metrics
-        println!("\nPerformance Metrics:");
-        println!("Generation Time: {}ms", result.performance_metrics.generation_time_ms);
-        println!("Memory Used: {:.2}MB", result.performance_metrics.memory_used_mb);
-        println!("Device Utilization: {:.1}%", result.performance_metrics.device_utilization * 100.0);
-
         Ok(())
-    }
-
-    fn create_generation_parameters(&self) -> GenerationParameters {
-        GenerationParameters {
-            prompt: self.prompt.clone(),
-            negative_prompt: self.negative_prompt.clone(),
-            width: self.width,
-            height: self.height,
-            num_inference_steps: self.steps,
-            guidance_scale: self.guidance_scale,
-            seed: self.seed,
-            batch_size: 1,
-        }
-    }
-
-    fn create_output_config(&self) -> OutputConfig {
-        OutputConfig {
-            output_dir: self.output_dir.clone(),
-            file_prefix: "nft".to_string(),
-            format: ImageFormat::PNG,
-        }
     }
 }

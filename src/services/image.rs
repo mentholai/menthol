@@ -211,7 +211,15 @@ impl ImageService {
         let text_encoder_path = model_path.join("text_encoder").join("model.onnx");
         let unet_path = model_path.join("unet").join("model.onnx");
         let vae_decoder_path = model_path.join("vae_decoder").join("model.onnx");
-        let tokenizer_path = model_path.join("tokenizer").join("tokenizer.json");
+        let mut tokenizer_path = PathBuf::from("models/tokenizer/tokenizer.json");
+        if !tokenizer_path.exists() {
+            let alt_path = PathBuf::from("models/tokenizer/vocab.json");
+            if alt_path.exists() {
+                tokenizer_path = alt_path;
+            } else {
+                return Err(NFTError::ModelLoadError("Tokenizer not found!".to_string().into()));
+            }
+        }
 
         // Verify all required files exist
         if !text_encoder_path.exists() {
