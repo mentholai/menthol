@@ -44,6 +44,7 @@ impl ImageProcessor {
     }
 
     pub fn generate(&mut self, thought_vector: &ThoughtVector) -> Result<GenerationResult> {
+
         let params = self.process_thought_vector(thought_vector);
         
         // Create generation config

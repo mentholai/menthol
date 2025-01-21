@@ -3,6 +3,7 @@ use crate::models::{
 };
 use std::{path::PathBuf};
 use std::time::Instant;
+use image::imageops::FilterType;
 use ort::{tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session, SessionBuilder, Value};
 use tokenizers::Tokenizer;
 use ndarray::{s, Array, Array0, Array3, Array4, ArrayD, Axis, CowArray, IxDyn};
@@ -39,7 +40,7 @@ impl MemoryTracker {
 }
 
 struct DiffusionScheduler {
-    timesteps: Vec<f32>,
+    timesteps: Vec<i64>,  
     alphas: Vec<f32>,
     alphas_cumprod: Vec<f32>,
 }
@@ -50,6 +51,16 @@ impl DiffusionScheduler {
         let beta_start = 0.00085f32;
         let beta_end = 0.012f32;
         let num_train_timesteps = 1000;
+
+
+        let step_size = (num_train_timesteps as f64 / num_inference_steps as f64).round() as usize;
+        let timesteps: Vec<i64> = (0..num_inference_steps)
+            .map(|i| (num_train_timesteps - (i + 1) * step_size) as i64)
+            .rev()
+            .collect();
+        
+
+        println!("Timesteps: {:?}", timesteps);  // Debug print
 
         let mut betas = Vec::with_capacity(num_train_timesteps);
         for i in 0..num_train_timesteps {
@@ -65,12 +76,6 @@ impl DiffusionScheduler {
             alphas_cumprod.push(cumprod);
         }
 
-        // Calculate timesteps
-        let step_size = num_train_timesteps / num_inference_steps;
-        let timesteps: Vec<f32> = (0..num_inference_steps)
-            .map(|i| (num_train_timesteps - (i + 1) * step_size) as f32)
-            .collect();
-
         Self {
             timesteps,
             alphas,
@@ -78,20 +83,35 @@ impl DiffusionScheduler {
         }
     }
 
-    fn timesteps(&self) -> &[f32] {
+    fn timesteps(&self) -> &[i64] {
         &self.timesteps
     }
 
     fn step(
         &self,
         noise_pred: Array4<f32>,
-        timestep: f32,
+        timestep: i64,
         latents: &Array4<f32>,
         guidance_scale: f32,
     ) -> Result<Array4<f32>> {
+        println!("Scheduler step for timestep {}", timestep);
+        
+        // Split noise predictions
+        let noise_pred_uncond = noise_pred.slice(s![0..1, .., .., ..]).to_owned();
+        let noise_pred_text = noise_pred.slice(s![1..2, .., .., ..]).to_owned();
+        
+        // Print ranges for debugging
+        println!("Uncond noise pred range: {} to {}", 
+            noise_pred_uncond.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            noise_pred_uncond.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+        println!("Text noise pred range: {} to {}", 
+            noise_pred_text.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            noise_pred_text.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
     
-        let noise_pred_combined = noise_pred.clone();
-    
+        // Perform classifier free guidance
+        let noise_pred_combined = &noise_pred_uncond + 
+            (guidance_scale * (&noise_pred_text - &noise_pred_uncond));
+        
         // Get timestep index
         let timestep_index = self.timesteps.iter()
             .position(|&t| t == timestep)
@@ -103,16 +123,18 @@ impl DiffusionScheduler {
     
         let prev_timestep_index = if timestep_index > 0 { timestep_index - 1 } else { 0 };
         let alpha_prod_prev = self.alphas_cumprod[prev_timestep_index];
-    
-        let variance = beta * (1.0 - alpha_prod_prev) / (1.0 - alpha_prod);
         
-        // Create the denoised sample
-        let pred_original_sample = (latents - variance.sqrt() * &noise_pred_combined) / alpha_prod.sqrt();
+        // Print scheduler parameters for debugging
+        println!("Alpha: {}, Alpha_prod: {}, Beta: {}", alpha, alpha_prod, beta);
+    
+        // Perform denoising step
+        let pred_original_sample = (latents - beta.sqrt() * &noise_pred_combined) / alpha.sqrt();
         
         // Calculate previous sample
         let mut prev_sample = alpha_prod_prev.sqrt() * &pred_original_sample +
-            variance.sqrt() * &noise_pred_combined;
+            (1.0 - alpha_prod_prev).sqrt() * &noise_pred_combined;
     
+        // Add noise at non-final timesteps
         if timestep_index > 0 {
             let noise_shape = prev_sample.raw_dim();
             let normal = Normal::new(0.0, 1.0)
@@ -120,8 +142,13 @@ impl DiffusionScheduler {
             
             let mut rng = rand::thread_rng();
             let noise = Array4::from_shape_simple_fn(noise_shape, || normal.sample(&mut rng) as f32);
-            prev_sample = prev_sample + variance.sqrt() * noise;
+            prev_sample = prev_sample + beta.sqrt() * noise;
         }
+    
+        // Print output ranges for debugging
+        println!("Denoised sample range: {} to {}", 
+            prev_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            prev_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
         
         Ok(prev_sample)
     }
@@ -142,35 +169,31 @@ impl ImageService {
         &self,
         latent_input: &Array4<f32>,
         text_embeddings: &Array3<f32>,
-        timestep: f32,
+        timestep: i64,
     ) -> Result<Array4<f32>> {
+        println!("Input shapes:");
+        println!("Latent input: {:?}", latent_input.shape());
+        println!("Text embeddings: {:?}", text_embeddings.shape());
     
-        // Ensure text embeddings are in batch size 1 for UNet
-        let batch_size = 1;
-        let seq_length = text_embeddings.shape()[1];
-        let hidden_size = text_embeddings.shape()[2];
-        
-        let text_embeddings_reshaped = text_embeddings
-    .slice(s![..1, .., ..])
-    .to_owned()
-    .into_shape((batch_size, seq_length, hidden_size))
-    .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape text embeddings: {}", e)))?;
-    
-        // Convert to dynamic arrays
+        let text_embeddings_dyn = text_embeddings.clone().into_dyn();
         let latent_input_dyn = latent_input.clone().into_dyn();
-        let text_embeddings_dyn = text_embeddings_reshaped.into_dyn();
         
-        // Create timestep array
+        // Create timestep array as i64
         let timestep_array = Array::from_shape_vec(
-            ndarray::IxDyn(&[1]),
-            vec![timestep]
+            ndarray::IxDyn(&[1]),  // Shape: single element array
+            vec![timestep]         // Value: actual timestep 
         ).map_err(|e| NFTError::ProcessingError(format!("Failed to create timestep tensor: {}", e)))?;
+        println!("Creating timestep tensor with incoming timestep: {}", timestep);
+    
+        println!("Transformed shapes:");
+        println!("Latent input: {:?}", latent_input_dyn.shape());
+        println!("Text embeddings: {:?}", text_embeddings_dyn.shape());
+        println!("Timestep array value: {:?}", timestep_array.as_slice().unwrap());
     
         // Create CowArrays
         let latent_cow = CowArray::from(&latent_input_dyn);
         let text_cow = CowArray::from(&text_embeddings_dyn);
         let timestep_cow = CowArray::from(&timestep_array);
-
     
         // Create ONNX tensors
         let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
@@ -179,36 +202,30 @@ impl ImageService {
         let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
         
+        // Try to inspect the timestep tensor value
+        if let Ok(tensor_data) = timestep_tensor.try_extract::<i64>() {
+            println!("ONNX timestep tensor value: {:?}", tensor_data);
+        }
+        
         let text_tensor = Value::from_array(self.unet.allocator(), &text_cow)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet text input tensor: {}", e)))?;
     
-        // Run UNet with correct input order
+
         let outputs = self.unet.run(vec![latent_tensor, timestep_tensor, text_tensor])
             .map_err(|e| NFTError::ProcessingError(format!("UNet inference failed: {}", e)))?;
     
-            let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
+        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|e| NFTError::ProcessingError(format!("Failed to extract UNet output: {}", e)))?;
     
-        let view = extracted_tensor.view();
-        let mut noise_pred_array = Array4::<f32>::zeros((1, 4, 64, 64));
-        
-        // Copy data using nested iteration
-        for n in 0..1 {
-            for c in 0..4 {
-                for h in 0..64 {
-                    for w in 0..64 {
-                        let idx = n * 16384 + c * 4096 + h * 64 + w;
-                        if let Some(&val) = view.as_slice().and_then(|s| s.get(idx)) {
-                            noise_pred_array[[n, c, h, w]] = val;
-                        }
-                    }
-                }
-            }
-        }
-        
-        Ok(noise_pred_array)
+        println!("Output tensor shape: {:?}", extracted_tensor.view().shape());
     
+  
+        let noise_pred_array = Array::from_iter(extracted_tensor.view().iter().copied())
+            .into_shape(latent_input.raw_dim())
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape UNet output: {}", e)))?;
+    
+        Ok(noise_pred_array)
     }
     
     pub fn new(model_path: PathBuf, output_path: PathBuf) -> Result<Self> {
@@ -316,9 +333,9 @@ impl ImageService {
             config.parameters.negative_prompt.as_deref().unwrap_or("")
         )?;
 
-        // Initialize latents
+        let batch_size = 1; 
         let mut latents = self.initialize_latents(
-            1,
+            batch_size,
             config.parameters.seed
         )?;
 
@@ -328,24 +345,38 @@ impl ImageService {
         );
 
         // Diffusion process
-        for (_timestep_index, timestep) in scheduler.timesteps().iter().enumerate() {
+        for (timestep_index, &timestep) in scheduler.timesteps().iter().enumerate() {
+            println!("Processing timestep {}/{}: {}", 
+                timestep_index + 1, 
+                scheduler.timesteps().len(),
+                timestep);
+            
             // Prepare latent input
-            let latent_input = self.prepare_latent_input(&latents, *timestep)?;
-
+            let latent_input = self.prepare_latent_input(&latents, timestep)?;
+        
             // Run UNet inference
             let noise_pred = self.unet_inference(
                 &latent_input,
                 &text_embeddings,
-                *timestep
+                timestep
             )?;
-
+        
+            // Track values for debugging
+            println!("Noise pred range: {} to {}", 
+                noise_pred.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                noise_pred.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+        
             // Scheduler step
             latents = scheduler.step(
                 noise_pred,
-                *timestep,
+                timestep,
                 &latents,
                 config.parameters.guidance_scale
             )?;
+            
+            println!("Latents range: {} to {}", 
+                latents.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+                latents.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
         }
 
         // Decode latents to image
@@ -372,20 +403,19 @@ impl ImageService {
         let neg_tokens = self.tokenizer.encode(negative_prompt, true)
             .map_err(|e| NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e)))?;
     
-
-    
         let token_ids = tokens.get_ids();
         let neg_token_ids = neg_tokens.get_ids();
     
-        // Ensure correct shape [2, 77]
-        let mut input_ids = vec![0i64; MAX_TEXT_LENGTH];
-        let mut neg_input_ids = vec![0i64; MAX_TEXT_LENGTH];
+        // Ensure correct shape [2, 77] and use i32 instead of i64
+        let mut input_ids = vec![0i32; MAX_TEXT_LENGTH];  // Changed to i32
+        let mut neg_input_ids = vec![0i32; MAX_TEXT_LENGTH];  // Changed to i32
     
         let token_len = token_ids.len().min(MAX_TEXT_LENGTH);
         let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
     
-        input_ids[..token_len].copy_from_slice(&token_ids[..token_len].iter().map(|&x| x as i64).collect::<Vec<_>>());
-        neg_input_ids[..neg_token_len].copy_from_slice(&neg_token_ids[..neg_token_len].iter().map(|&x| x as i64).collect::<Vec<_>>());
+        // Convert to i32 during copying
+        input_ids[..token_len].copy_from_slice(&token_ids[..token_len].iter().map(|&x| x as i32).collect::<Vec<_>>());
+        neg_input_ids[..neg_token_len].copy_from_slice(&neg_token_ids[..neg_token_len].iter().map(|&x| x as i32).collect::<Vec<_>>());
     
         let input_tensor = ndarray::Array2::from_shape_vec(
             (2, MAX_TEXT_LENGTH),
@@ -429,77 +459,96 @@ impl ImageService {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
             None => rand::rngs::StdRng::from_entropy(),
         };
-
+    
         let normal = Normal::new(0.0, 1.0)
             .map_err(|_e| NFTError::ProcessingError("Failed to create normal distribution".to_string()))?;
-
+    
+        // Initialize with batch_size of 1
         let shape = [
-            batch_size,
+            1, 
             LATENT_CHANNELS,
             LATENT_HEIGHT,
             LATENT_WIDTH
         ];
-
+    
         let mut latents = Array4::<f32>::zeros(shape);
         for item in latents.iter_mut() {
             *item = normal.sample(&mut rng) as f32;
         }
-
+    
         Ok(latents)
     }
 
-    fn prepare_latent_input(&self, latents: &Array4<f32>, _timestep: f32) -> Result<Array4<f32>> {
-        let mut input = latents.clone();
-        input.mapv_inplace(|x| x / 0.18215);
-        Ok(input)
+    fn prepare_latent_input(&self, latents: &Array4<f32>, _timestep: i64) -> Result<Array4<f32>> {
+        // Create array with batch size 2
+        let mut duplicated = Array4::<f32>::zeros([2, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH]);
+        
+        // Copy the single batch to both positions
+        duplicated.slice_mut(s![0..1, .., .., ..]).assign(&latents.slice(s![0..1, .., .., ..]));
+        duplicated.slice_mut(s![1..2, .., .., ..]).assign(&latents.slice(s![0..1, .., .., ..]));
+        
+        
+        Ok(duplicated)
     }
+
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
-        // Scale and decode
-        let mut scaled_latents = latents.clone();
-        scaled_latents.mapv_inplace(|x| 1.0 / 0.18215 * x);
+        // Take first batch and scale appropriately
+        let latents_slice = latents.slice(s![0..1, .., .., ..]).to_owned();
+        let mut scaled_latents = latents_slice;
+        
+
+        scaled_latents.mapv_inplace(|x| x / 0.18215);
+        
+        println!("VAE input ranges: {} to {}", 
+            scaled_latents.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            scaled_latents.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
     
-        // Convert to dynamic dimensions and create CowArray
         let scaled_latents_dyn = scaled_latents.into_dyn();
         let scaled_latents_cow = CowArray::from(&scaled_latents_dyn);
     
-        // Prepare VAE input
         let vae_input = Value::from_array(self.vae_decoder.allocator(), &scaled_latents_cow)
             .map_err(|_e| NFTError::ProcessingError("Failed to create VAE input".to_string()))?;
     
-        // Run VAE decoder
         let outputs = self.vae_decoder.run(vec![vae_input])
             .map_err(|_e| NFTError::ProcessingError("VAE decoding failed".to_string()))?;
     
-        // Extract image
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|_e| NFTError::ProcessingError("Failed to extract decoded image".to_string()))?;
     
-        // Convert to Array4 with correct shape
-        let shape = (1, 3, 512, 512); 
+        println!("VAE output shape: {:?}", extracted_tensor.view().shape());
+    
+        // Reshape to expected dimensions for a single image
+        let shape = (1, 3, 512, 512);
         let image_array = Array::from_iter(extracted_tensor.view().iter().copied())
             .into_shape(shape)
-            .map_err(|_e| NFTError::ProcessingError("Failed to reshape decoded image".to_string()))?;
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape decoded image: {:?}", e)))?;
     
-        // Convert to RGB image
         self.array_to_image(&image_array)
     }
+    
 
     fn array_to_image(&self, array: &Array4<f32>) -> Result<RgbImage> {
-        let (_, channels, height, width) = array.dim();
+        let (batch, channels, height, width) = array.dim();
         assert_eq!(channels, 3, "Expected RGB image with 3 channels");
-
+        assert_eq!(batch, 1, "Expected single batch");
+    
         let mut img = RgbImage::new(width as u32, height as u32);
-
+    
         for y in 0..height {
             for x in 0..width {
-                let r = (array[[0, 0, y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-                let g = (array[[0, 1, y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-                let b = (array[[0, 2, y, x]].clamp(0.0, 1.0) * 255.0) as u8;
-                img.put_pixel(x as u32, y as u32, Rgb([r, g, b]));
+                let r = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
+                let g = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
+                let b = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
+                
+                img.put_pixel(x as u32, y as u32, Rgb([
+                    r as u8,
+                    g as u8,
+                    b as u8
+                ]));
             }
         }
-
+    
         Ok(img)
     }
 
@@ -555,7 +604,7 @@ mod tests {
     fn test_prepare_latent_input() {
         let service = create_test_service();
         let input = Array4::<f32>::zeros((1, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH));
-        let scaled = service.prepare_latent_input(&input, 0.0).unwrap();
+        let scaled = service.prepare_latent_input(&input, 0).unwrap();
         assert_eq!(scaled.shape(), input.shape());
     }
 
