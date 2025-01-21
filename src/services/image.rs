@@ -89,14 +89,24 @@ impl DiffusionScheduler {
         latents: &Array4<f32>,
         guidance_scale: f32,
     ) -> Result<Array4<f32>> {
-        // Split noise prediction for guidance
+        // Let's add debug prints
+        println!("Step input shapes:");
+        println!("noise_pred: {:?}", noise_pred.shape());
+        println!("latents: {:?}", latents.shape());
+    
+        // Split noise prediction for guidance - this is where it might be failing
         let (noise_pred_uncond, noise_pred_text) = noise_pred.view().split_at(Axis(0), 1);
         
-        // Perform guidance
-        let noise_pred = &noise_pred_uncond.to_owned() + 
-            guidance_scale * (&noise_pred_text.to_owned() - &noise_pred_uncond.to_owned());
-
-        // Get alpha and beta for current timestep
+        println!("Split shapes:");
+        println!("uncond: {:?}", noise_pred_uncond.shape());
+        println!("text: {:?}", noise_pred_text.shape());
+        
+        // Try a different approach to the guidance calculation
+        let mut noise_pred_combined = noise_pred_uncond.to_owned();
+        noise_pred_combined = &noise_pred_combined + 
+            (guidance_scale * (&noise_pred_text - &noise_pred_uncond));
+    
+        // Get timestep index
         let timestep_index = self.timesteps.iter()
             .position(|&t| t == timestep)
             .ok_or_else(|| NFTError::ProcessingError("Invalid timestep".to_string()))?;
@@ -104,31 +114,31 @@ impl DiffusionScheduler {
         let alpha = self.alphas[timestep_index];
         let alpha_prod = self.alphas_cumprod[timestep_index];
         let beta = 1.0 - alpha;
-
-        // Previous alpha for variance calculation
+    
         let prev_timestep_index = if timestep_index > 0 { timestep_index - 1 } else { 0 };
         let alpha_prod_prev = self.alphas_cumprod[prev_timestep_index];
-
-        // Calculate variance
+    
         let variance = beta * (1.0 - alpha_prod_prev) / (1.0 - alpha_prod);
         
-        // Predict the mean
-        let pred_original_sample = (latents - variance.sqrt() * &noise_pred) / alpha_prod.sqrt();
+        // Create the denoised sample
+        let pred_original_sample = (latents - variance.sqrt() * &noise_pred_combined) / alpha_prod.sqrt();
         
-        // Calculate x_t-1
-        let mut prev_sample = alpha_prod_prev.sqrt() * pred_original_sample +
-            variance.sqrt() * &noise_pred;
-
+        // Calculate previous sample
+        let mut prev_sample = alpha_prod_prev.sqrt() * &pred_original_sample +
+            variance.sqrt() * &noise_pred_combined;
+    
         if timestep_index > 0 {
+            let noise_shape = prev_sample.raw_dim();
+            let normal = Normal::new(0.0, 1.0)
+                .map_err(|_| NFTError::ProcessingError("Failed to create normal distribution".to_string()))?;
+            
             let mut rng = rand::thread_rng();
-            let normal = rand_distr::Normal::new(0.0, 1.0).unwrap();
-            let noise = Array4::from_shape_fn(
-                prev_sample.raw_dim(),
-                |_| normal.sample(&mut rng) as f32
-            );
+            let noise = Array4::from_shape_simple_fn(noise_shape, || normal.sample(&mut rng) as f32);
             prev_sample = prev_sample + variance.sqrt() * noise;
         }
-
+    
+        println!("Output shape: {:?}", prev_sample.shape());
+        
         Ok(prev_sample)
     }
 }
@@ -147,45 +157,85 @@ impl ImageService {
     fn unet_inference(
         &self,
         latent_input: &Array4<f32>,
-        text_embeddings: &Array3<f32>, // 🔥 Ensure correct shape
+        text_embeddings: &Array3<f32>,
         timestep: f32,
     ) -> Result<Array4<f32>> {
+        // Print original shapes
+        println!("Original shapes:");
+        println!("Latent input: {:?}", latent_input.shape());
+        println!("Text embeddings: {:?}", text_embeddings.shape());
+    
+        // Ensure text embeddings are in batch size 1 for UNet
+        let batch_size = 1;
+        let seq_length = text_embeddings.shape()[1];
+        let hidden_size = text_embeddings.shape()[2];
+        
+        let text_embeddings_reshaped = text_embeddings
+    .slice(s![..1, .., ..])
+    .to_owned()
+    .into_shape((batch_size, seq_length, hidden_size))
+    .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape text embeddings: {}", e)))?;
+
+
+println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
+    
+        // Convert to dynamic arrays
         let latent_input_dyn = latent_input.clone().into_dyn();
-        let text_embeddings_dyn = text_embeddings.clone().into_dyn();
-        let timestep_array: ArrayD<f32> = Array::from_shape_vec(
-            ndarray::IxDyn(&[1]), vec![timestep]
+        let text_embeddings_dyn = text_embeddings_reshaped.into_dyn();
+        
+        // Create timestep array
+        let timestep_array = Array::from_shape_vec(
+            ndarray::IxDyn(&[1]),
+            vec![timestep]
         ).map_err(|e| NFTError::ProcessingError(format!("Failed to create timestep tensor: {}", e)))?;
     
+        // Create CowArrays
         let latent_cow = CowArray::from(&latent_input_dyn);
         let text_cow = CowArray::from(&text_embeddings_dyn);
-        let timestep_cow: CowArray<f32, IxDyn> = CowArray::from(timestep_array.into_dyn());
+        let timestep_cow = CowArray::from(&timestep_array);
     
-        println!("Latent input shape: {:?}", latent_cow.shape());
-        println!("Text embeddings shape (after fix): {:?}", text_cow.shape());
-        println!("Timestep shape: {:?}", timestep_cow.shape());
+        println!("Transformed shapes:");
+        println!("Latent input: {:?}", latent_cow.shape());
+        println!("Text embeddings: {:?}", text_cow.shape());
+        println!("Timestep: {:?}", timestep_cow.shape());
     
+        // Create ONNX tensors
         let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet input tensor: {}", e)))?;
-    
+        
+        let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
+        
         let text_tensor = Value::from_array(self.unet.allocator(), &text_cow)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet text input tensor: {}", e)))?;
     
-        let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
-            .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
-    
+        // Run UNet with correct input order
         let outputs = self.unet.run(vec![latent_tensor, timestep_tensor, text_tensor])
             .map_err(|e| NFTError::ProcessingError(format!("UNet inference failed: {}", e)))?;
     
-        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
+            let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|e| NFTError::ProcessingError(format!("Failed to extract UNet output: {}", e)))?;
     
-        let shape = latent_input.raw_dim();
-        let noise_pred_array = Array::from_iter(extracted_tensor.view().iter().copied())
-            .into_shape(shape)
-            .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape UNet output: {}", e)))?;
-    
+        let view = extracted_tensor.view();
+        let mut noise_pred_array = Array4::<f32>::zeros((1, 4, 64, 64));
+        
+        // Copy data using nested iteration
+        for n in 0..1 {
+            for c in 0..4 {
+                for h in 0..64 {
+                    for w in 0..64 {
+                        let idx = n * 16384 + c * 4096 + h * 64 + w;
+                        if let Some(&val) = view.as_slice().and_then(|s| s.get(idx)) {
+                            noise_pred_array[[n, c, h, w]] = val;
+                        }
+                    }
+                }
+            }
+        }
+        
         Ok(noise_pred_array)
+    
     }
     
     pub fn new(model_path: PathBuf, output_path: PathBuf) -> Result<Self> {
@@ -386,7 +436,7 @@ impl ImageService {
     
         // Ensure correct projection to match UNet expectations
         let actual_hidden_dim = 768;  // Current shape
-        let expected_hidden_dim = 4096;  // Target shape
+        let expected_hidden_dim = 768;  // Target shape
     
         println!("⚠️ Projecting text embeddings from {} → {}", actual_hidden_dim, expected_hidden_dim);
         
