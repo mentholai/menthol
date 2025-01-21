@@ -7,6 +7,7 @@ edition = "2021"
 # Web framework (if we still need it)
 actix-web = "4.4"
 actix-cors = "0.6"
+ndarray-linalg = { version = "0.16", features = ["intel-mkl"] } 
 
 # Async runtime
 tokio = { version = "1.28", features = ["full"] }
@@ -55,3 +56,7 @@ ndarray = "0.15"
 # CLI
 clap = { version = "4.4", features = ["derive"] }
 indicatif = "0.17"
+
+[build-dependencies]
+cc = "1.0"
+

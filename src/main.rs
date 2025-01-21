@@ -1,3 +1,4 @@
+#![recursion_limit = "16363"]
 mod brain;
 mod models;
 mod services;

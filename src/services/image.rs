@@ -5,7 +5,7 @@ use std::{path::PathBuf};
 use std::time::Instant;
 use ort::{tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session, SessionBuilder, Value};
 use tokenizers::Tokenizer;
-use ndarray::{Array, Array0, Array4, Axis, CowArray, IxDyn};
+use ndarray::{s, Array, Array0, Array3, Array4, ArrayD, Axis, CowArray, IxDyn};
 use std::sync::Arc;
 use image::{Rgb, RgbImage};
 use rand::{SeedableRng};
@@ -147,55 +147,47 @@ impl ImageService {
     fn unet_inference(
         &self,
         latent_input: &Array4<f32>,
-        text_embeddings: &Array4<f32>,
+        text_embeddings: &Array3<f32>, // 🔥 Ensure correct shape
         timestep: f32,
     ) -> Result<Array4<f32>> {
-        // Convert arrays to dynamic dimension and store them
         let latent_input_dyn = latent_input.clone().into_dyn();
         let text_embeddings_dyn = text_embeddings.clone().into_dyn();
-        let timestep_array = Array0::from_elem((), timestep).into_dyn();
-        
-        // Create and store CowArrays
+        let timestep_array: ArrayD<f32> = Array::from_shape_vec(
+            ndarray::IxDyn(&[1]), vec![timestep]
+        ).map_err(|e| NFTError::ProcessingError(format!("Failed to create timestep tensor: {}", e)))?;
+    
         let latent_cow = CowArray::from(&latent_input_dyn);
         let text_cow = CowArray::from(&text_embeddings_dyn);
-        let timestep_cow = CowArray::from(&timestep_array);
-        
-        // Create all tensors
-        let input_tensors = {
-            let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
-                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet input tensor: {}", e)))?;
+        let timestep_cow: CowArray<f32, IxDyn> = CowArray::from(timestep_array.into_dyn());
     
-            let text_tensor = Value::from_array(self.unet.allocator(), &text_cow)
-                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet text input tensor: {}", e)))?;
+        println!("Latent input shape: {:?}", latent_cow.shape());
+        println!("Text embeddings shape (after fix): {:?}", text_cow.shape());
+        println!("Timestep shape: {:?}", timestep_cow.shape());
     
-            let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
-                .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
+        let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet input tensor: {}", e)))?;
     
-            vec![latent_tensor, text_tensor, timestep_tensor]
-        };
+        let text_tensor = Value::from_array(self.unet.allocator(), &text_cow)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet text input tensor: {}", e)))?;
     
-        // Run model with all tensors
-        let outputs = self.unet.run(input_tensors)
+        let timestep_tensor = Value::from_array(self.unet.allocator(), &timestep_cow)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create UNet timestep tensor: {}", e)))?;
+    
+        let outputs = self.unet.run(vec![latent_tensor, timestep_tensor, text_tensor])
             .map_err(|e| NFTError::ProcessingError(format!("UNet inference failed: {}", e)))?;
     
-        // Extract and convert result
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|e| NFTError::ProcessingError(format!("Failed to extract UNet output: {}", e)))?;
-        
-        let shape = (
-            latent_input.shape()[0],
-            latent_input.shape()[1],
-            latent_input.shape()[2],
-            latent_input.shape()[3],
-        );
-        
+    
+        let shape = latent_input.raw_dim();
         let noise_pred_array = Array::from_iter(extracted_tensor.view().iter().copied())
             .into_shape(shape)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape UNet output: {}", e)))?;
     
         Ok(noise_pred_array)
     }
+    
     pub fn new(model_path: PathBuf, output_path: PathBuf) -> Result<Self> {
 
     let env = Arc::new(Environment::builder()
@@ -207,7 +199,7 @@ impl ImageService {
     .build()
     .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?);
 
-        // Setup paths for each model component
+   
         let text_encoder_path = model_path.join("text_encoder").join("model.onnx");
         let unet_path = model_path.join("unet").join("model.onnx");
         let vae_decoder_path = model_path.join("vae_decoder").join("model.onnx");
@@ -350,48 +342,68 @@ impl ImageService {
         })
     }
 
-    fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array4<f32>> {
+    fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array3<f32>> {
         // Tokenize prompts
         let tokens = self.tokenizer.encode(prompt, true)
-            .map_err(|_e| NFTError::ProcessingError("Tokenization failed".to_string()))?;
+            .map_err(|e| NFTError::ProcessingError(format!("Tokenization failed: {:?}", e)))?;
         let neg_tokens = self.tokenizer.encode(negative_prompt, true)
-            .map_err(|_e| NFTError::ProcessingError("Negative tokenization failed".to_string()))?;
+            .map_err(|e| NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e)))?;
     
-        // Convert to tensors
-        let mut input_ids = vec![0; MAX_TEXT_LENGTH];
-        let mut neg_input_ids = vec![0; MAX_TEXT_LENGTH];
+        println!("Token lengths - Prompt: {}, Negative: {}", tokens.get_ids().len(), neg_tokens.get_ids().len());
     
-        // Copy and pad tokens
-        input_ids[..tokens.get_ids().len()].copy_from_slice(tokens.get_ids());
-        neg_input_ids[..neg_tokens.get_ids().len()].copy_from_slice(neg_tokens.get_ids());
+        let token_ids = tokens.get_ids();
+        let neg_token_ids = neg_tokens.get_ids();
     
-        // Create input tensor and convert to dynamic form
+        // Ensure correct shape [2, 77]
+        let mut input_ids = vec![0i64; MAX_TEXT_LENGTH];
+        let mut neg_input_ids = vec![0i64; MAX_TEXT_LENGTH];
+    
+        let token_len = token_ids.len().min(MAX_TEXT_LENGTH);
+        let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
+    
+        input_ids[..token_len].copy_from_slice(&token_ids[..token_len].iter().map(|&x| x as i64).collect::<Vec<_>>());
+        neg_input_ids[..neg_token_len].copy_from_slice(&neg_token_ids[..neg_token_len].iter().map(|&x| x as i64).collect::<Vec<_>>());
+    
         let input_tensor = ndarray::Array2::from_shape_vec(
             (2, MAX_TEXT_LENGTH),
-            [&neg_input_ids[..], &input_ids[..]].concat()
-        ).map_err(|_e| NFTError::ProcessingError("Failed to create input tensor".to_string()))?;
-        
-        // Convert to dynamic dimensions and create CowArray
+            neg_input_ids.into_iter().chain(input_ids.into_iter()).collect()
+        ).map_err(|e| NFTError::ProcessingError(format!("Failed to create input tensor: {:?}", e)))?;
+    
         let input_tensor_dyn = input_tensor.into_dyn();
         let input_tensor_cow = CowArray::from(&input_tensor_dyn);
-    
-        // Run text encoder
+        
         let input = Value::from_array(self.text_encoder.allocator(), &input_tensor_cow)
-            .map_err(|_e| NFTError::ProcessingError("Failed to create input value".to_string()))?;
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create input value: {:?}", e)))?;
     
+        println!("Running text encoder...");
         let outputs = self.text_encoder.run(vec![input])
-            .map_err(|_e| NFTError::ProcessingError("Text encoder inference failed".to_string()))?;
-
+            .map_err(|e| NFTError::ProcessingError(format!("Text encoder inference failed: {:?}", e)))?;
+    
+        println!("Text encoder run completed");
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
-            .map_err(|_e| NFTError::ProcessingError("Failed to extract embeddings".to_string()))?;
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to extract embeddings: {:?}", e)))?;
+    
+        // Ensure correct projection to match UNet expectations
+        let actual_hidden_dim = 768;  // Current shape
+        let expected_hidden_dim = 4096;  // Target shape
+    
+        println!("⚠️ Projecting text embeddings from {} → {}", actual_hidden_dim, expected_hidden_dim);
         
-        let shape = (2, 77, 768, 1); 
-        Array::from_iter(extracted_tensor.view().iter().copied())
-            .into_shape(shape)
-            .map_err(|_e| NFTError::ProcessingError("Failed to reshape embeddings".to_string()))
-    }
+        let mut projected_embeddings = ndarray::Array3::<f32>::zeros((2, 77, expected_hidden_dim));
+        
 
+        for i in 0..actual_hidden_dim {
+            for j in 0..expected_hidden_dim {
+                projected_embeddings.slice_mut(s![.., .., j]).assign(&extracted_tensor.view().slice(s![.., .., i]));
+            }
+        }
+    
+        println!("Projected text embeddings shape: {:?}", projected_embeddings.shape());
+    
+        Ok(projected_embeddings)
+    }
+    
     fn initialize_latents(&self, batch_size: usize, seed: Option<u64>) -> Result<Array4<f32>> {
         let mut rng = match seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
