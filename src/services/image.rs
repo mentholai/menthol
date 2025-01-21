@@ -89,22 +89,8 @@ impl DiffusionScheduler {
         latents: &Array4<f32>,
         guidance_scale: f32,
     ) -> Result<Array4<f32>> {
-        // Let's add debug prints
-        println!("Step input shapes:");
-        println!("noise_pred: {:?}", noise_pred.shape());
-        println!("latents: {:?}", latents.shape());
     
-        // Split noise prediction for guidance - this is where it might be failing
-        let (noise_pred_uncond, noise_pred_text) = noise_pred.view().split_at(Axis(0), 1);
-        
-        println!("Split shapes:");
-        println!("uncond: {:?}", noise_pred_uncond.shape());
-        println!("text: {:?}", noise_pred_text.shape());
-        
-        // Try a different approach to the guidance calculation
-        let mut noise_pred_combined = noise_pred_uncond.to_owned();
-        noise_pred_combined = &noise_pred_combined + 
-            (guidance_scale * (&noise_pred_text - &noise_pred_uncond));
+        let noise_pred_combined = noise_pred.clone();
     
         // Get timestep index
         let timestep_index = self.timesteps.iter()
@@ -136,8 +122,6 @@ impl DiffusionScheduler {
             let noise = Array4::from_shape_simple_fn(noise_shape, || normal.sample(&mut rng) as f32);
             prev_sample = prev_sample + variance.sqrt() * noise;
         }
-    
-        println!("Output shape: {:?}", prev_sample.shape());
         
         Ok(prev_sample)
     }
@@ -160,10 +144,6 @@ impl ImageService {
         text_embeddings: &Array3<f32>,
         timestep: f32,
     ) -> Result<Array4<f32>> {
-        // Print original shapes
-        println!("Original shapes:");
-        println!("Latent input: {:?}", latent_input.shape());
-        println!("Text embeddings: {:?}", text_embeddings.shape());
     
         // Ensure text embeddings are in batch size 1 for UNet
         let batch_size = 1;
@@ -175,9 +155,6 @@ impl ImageService {
     .to_owned()
     .into_shape((batch_size, seq_length, hidden_size))
     .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape text embeddings: {}", e)))?;
-
-
-println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
     
         // Convert to dynamic arrays
         let latent_input_dyn = latent_input.clone().into_dyn();
@@ -193,11 +170,7 @@ println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
         let latent_cow = CowArray::from(&latent_input_dyn);
         let text_cow = CowArray::from(&text_embeddings_dyn);
         let timestep_cow = CowArray::from(&timestep_array);
-    
-        println!("Transformed shapes:");
-        println!("Latent input: {:?}", latent_cow.shape());
-        println!("Text embeddings: {:?}", text_cow.shape());
-        println!("Timestep: {:?}", timestep_cow.shape());
+
     
         // Create ONNX tensors
         let latent_tensor = Value::from_array(self.unet.allocator(), &latent_cow)
@@ -399,7 +372,7 @@ println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
         let neg_tokens = self.tokenizer.encode(negative_prompt, true)
             .map_err(|e| NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e)))?;
     
-        println!("Token lengths - Prompt: {}, Negative: {}", tokens.get_ids().len(), neg_tokens.get_ids().len());
+
     
         let token_ids = tokens.get_ids();
         let neg_token_ids = neg_tokens.get_ids();
@@ -425,11 +398,10 @@ println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
         let input = Value::from_array(self.text_encoder.allocator(), &input_tensor_cow)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create input value: {:?}", e)))?;
     
-        println!("Running text encoder...");
+
         let outputs = self.text_encoder.run(vec![input])
             .map_err(|e| NFTError::ProcessingError(format!("Text encoder inference failed: {:?}", e)))?;
-    
-        println!("Text encoder run completed");
+
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|e| NFTError::ProcessingError(format!("Failed to extract embeddings: {:?}", e)))?;
@@ -438,7 +410,6 @@ println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
         let actual_hidden_dim = 768;  // Current shape
         let expected_hidden_dim = 768;  // Target shape
     
-        println!("⚠️ Projecting text embeddings from {} → {}", actual_hidden_dim, expected_hidden_dim);
         
         let mut projected_embeddings = ndarray::Array3::<f32>::zeros((2, 77, expected_hidden_dim));
         
@@ -448,8 +419,7 @@ println!("Reshaped embeddings shape: {:?}", text_embeddings_reshaped.shape());
                 projected_embeddings.slice_mut(s![.., .., j]).assign(&extracted_tensor.view().slice(s![.., .., i]));
             }
         }
-    
-        println!("Projected text embeddings shape: {:?}", projected_embeddings.shape());
+
     
         Ok(projected_embeddings)
     }
