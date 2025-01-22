@@ -1,5 +1,6 @@
 # 🌟 Menthol: Quantum-Powered AI NFT Genesis Platform
 
+
 ## 🚀 Redefining Digital Creativity Through Quantum Consciousness
 
 Menthol is a revolutionary AI ecosystem that transcends traditional creative boundaries, leveraging cutting-edge quantum neural processing to birth digital entities that are more than mere images—they are living, evolving artworks.
@@ -7,6 +8,8 @@ Menthol is a revolutionary AI ecosystem that transcends traditional creative bou
 ## 🛠 Quick Installation
 
 ### One-Line Installation
+
+### NOTE! ONE-LINE INSTALLATION IS COMING SOON!!!
 ```bash
 curl -sSL https://raw.githubusercontent.com/mentholai/menthol/main/install.sh | bash
 ```
@@ -64,6 +67,7 @@ pub async fn apply_quantum_transformation(&self, thought_vector: &mut ThoughtVec
     self.quantum_collapse(thought_vector).await;
 }
 ```
+**Note, quantum functions are strictly for fun. You didnt think your computer could handle Quantum computing did you?**
 
 ## 🌈 Generative Process: From Prompt to Masterpiece
 
@@ -170,11 +174,11 @@ Menthol is committed to:
 
 ## 🔗 Connect With Us
 - **GitHub**: [github.com/mentholai/menthol](https://github.com/mentholai/menthol)
-- **Discord**: [Join Our Community](https://discord.gg/menthol)
 - **Twitter**: [@MentholAI](https://twitter.com/mentholai)
 
 
 ---
+## NOTE! Not all details outlined in this readme have been completed yet, this readme is an expectation of the completed product. 
 
 **Disclaimer**: Menthol harnesses advanced AI and quantum computing. Create responsibly, respect intellectual boundaries, and explore the frontiers of digital creativity.
 

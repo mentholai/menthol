@@ -11,43 +11,34 @@ pub struct SolanaService {
 
 impl SolanaService {
     pub fn new(rpc_url: &str, keypair_path: &str) -> Result<Self> {
-        let client = RpcClient::new_with_commitment(
-            rpc_url.to_string(),
-            CommitmentConfig::confirmed(),
-        );
+        let client =
+            RpcClient::new_with_commitment(rpc_url.to_string(), CommitmentConfig::confirmed());
 
         // Load keypair from file
-        let keypair_bytes = std::fs::read(keypair_path)
-            .map_err(|e| NFTError::FileSystemError(e))?;
+        let keypair_bytes =
+            std::fs::read(keypair_path).map_err(|e| NFTError::FileSystemError(e))?;
         let keypair = Keypair::from_bytes(&keypair_bytes)
             .map_err(|e| NFTError::ConfigurationError(e.to_string()))?;
 
-        Ok(Self {
-            client,
-            keypair,
-        })
+        Ok(Self { client, keypair })
     }
 
     pub async fn mint_nft(&self, nft: &NFT) -> Result<String> {
         // Calculate required fees
         let fees = self.calculate_fees(nft)?;
-        
+
         // Upload to Arweave
         let arweave_uri = self.upload_to_arweave(nft).await?;
-        
+
         // Create mint account
         let mint_account = Keypair::new();
-        
+
         // Create token metadata
         let metadata = self.create_metadata(nft, &arweave_uri)?;
-        
+
         // Build and send transaction
-        let signature = self.send_mint_transaction(
-            &mint_account,
-            &metadata,
-            fees,
-        )?;
-        
+        let signature = self.send_mint_transaction(&mint_account, &metadata, fees)?;
+
         Ok(signature)
     }
 

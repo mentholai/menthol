@@ -1,0 +1,63 @@
+{
+  "resources": {
+    "compute": {
+      "preferred_device": "cuda",
+      "cpu_threads": 8,
+      "gpu_indices": [0],
+      "metal_enabled": false,
+      "cuda_enabled": true
+    },
+    "memory": {
+      "max_memory_gb": 16.0,
+      "cache_size_mb": 512,
+      "clear_cache_after_generation": true
+    },
+    "gpu_settings": {
+      "batch_size": 8,
+      "half_precision": true,
+      "memory_split": [0.5, 0.5],
+      "attention_slicing": false,
+      "vae_slicing": false
+    }
+  },
+  "models": {
+    "stable_diffusion": {
+      "base_model_path": "./models/stable-diffusion",
+      "vae_path": "./models/vae",
+      "lora_paths": ["./models/lora1", "./models/lora2"],
+      "textual_inversions": ["./models/textual_inversions"]
+    },
+    "custom_models": [],
+    "embeddings": [] 
+  },
+  "storage": {
+    "output_dir": "./output",
+    "cache_dir": "./cache",
+    "temp_dir": "./temp",
+    "metadata_dir": "./metadata"
+  },
+  "generation": {
+    "image": {
+      "width": 512,
+      "height": 512,
+      "format": "PNG",
+      "quality": 90,
+      "upscale": false,
+      "upscale_factor": 1.0
+    },
+    "prompt": {
+      "negative_prompt": "blurry, low quality, distorted",
+      "steps": 50,
+      "cfg_scale": 7.5,
+      "seed": null,
+      "style_preset": "cyberpunk"
+    },
+    "nft": {
+      "collection_name": "",
+      "symbol": "",
+      "seller_fee_basis_points": 500,
+      "creator_address": "",
+      "creator_share": 100
+    }
+  }
+}

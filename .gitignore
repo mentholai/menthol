@@ -4,3 +4,10 @@ models.zip
 /venv
 test.py
 /steampunk-diffusion
+/onnx_sd
+/test_output
+/output
+anotherTest.py
+python_detailed_test.png
+python_generated.png
+test_output.png

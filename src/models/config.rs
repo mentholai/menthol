@@ -139,7 +139,7 @@ impl SystemConfig {
         // Check if paths exist
         if !self.models.stable_diffusion.base_model_path.exists() {
             return Err(ConfigError::InvalidPath(
-                "Base model path does not exist".to_string()
+                "Base model path does not exist".to_string(),
             ));
         }
 
@@ -147,7 +147,7 @@ impl SystemConfig {
         if let Some(gpu_settings) = &self.resources.gpu_settings {
             if gpu_settings.memory_split.iter().sum::<f32>() != 1.0 {
                 return Err(ConfigError::InvalidValue(
-                    "GPU memory split must sum to 1.0".to_string()
+                    "GPU memory split must sum to 1.0".to_string(),
                 ));
             }
         }
@@ -155,7 +155,7 @@ impl SystemConfig {
         // Validate memory settings
         if self.resources.memory.max_memory_gb <= 0.0 {
             return Err(ConfigError::InvalidValue(
-                "Maximum memory must be positive".to_string()
+                "Maximum memory must be positive".to_string(),
             ));
         }
 
@@ -167,13 +167,13 @@ impl SystemConfig {
 pub enum ConfigError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
-    
+
     #[error("Invalid path: {0}")]
     InvalidPath(String),
-    
+
     #[error("Invalid value: {0}")]
     InvalidValue(String),
 }

@@ -1,5 +1,5 @@
-use async_trait::async_trait;
 use crate::models::ComputeDevice;
+use async_trait::async_trait;
 
 use super::types::*;
 use rand::Rng;
@@ -16,7 +16,7 @@ pub trait NeuralProcessor: Send + Sync {
 pub struct AdvancedNeuralProcessor {
     architecture: Arc<RwLock<NeuralArchitecture>>,
     consciousness_threshold: f64,
-    device: ComputeDevice,   
+    device: ComputeDevice,
 }
 
 impl AdvancedNeuralProcessor {
@@ -32,21 +32,22 @@ impl AdvancedNeuralProcessor {
         Self {
             architecture: Arc::new(RwLock::new(Self::initialize_architecture())),
             consciousness_threshold,
-            device: ComputeDevice::CPU, 
+            device: ComputeDevice::CPU,
         }
     }
 
-
     fn initialize_architecture() -> NeuralArchitecture {
         let mut rng = rand::thread_rng();
-        
+
         NeuralArchitecture {
-            layers: (0..4).map(|_| SynapticLayer {
-                weights: (0..512).map(|_| rng.gen::<f64>() * 2.0 - 1.0).collect(),
-                bias: (0..64).map(|_| rng.gen::<f64>() * 0.1).collect(),
-                activation_function: ActivationFunction::QuantumActivation,
-                dropout_rate: 0.2,
-            }).collect(),
+            layers: (0..4)
+                .map(|_| SynapticLayer {
+                    weights: (0..512).map(|_| rng.gen::<f64>() * 2.0 - 1.0).collect(),
+                    bias: (0..64).map(|_| rng.gen::<f64>() * 0.1).collect(),
+                    activation_function: ActivationFunction::QuantumActivation,
+                    dropout_rate: 0.2,
+                })
+                .collect(),
             consciousness_matrix: ConsciousnessMatrix {
                 values: vec![vec![0.0; 64]; 64],
                 eigenvalues: vec![0.0; 64],
@@ -78,7 +79,8 @@ impl AdvancedNeuralProcessor {
 impl NeuralProcessor for AdvancedNeuralProcessor {
     async fn process_thought(&self, input: &str) -> ThoughtVector {
         let arch = self.architecture.read().await;
-        let mut current = input.chars()
+        let mut current = input
+            .chars()
             .map(|c| c as u8 as f64 / 255.0)
             .collect::<Vec<f64>>();
 
@@ -98,7 +100,8 @@ impl NeuralProcessor for AdvancedNeuralProcessor {
     }
 
     async fn generate_response(&self, thought: ThoughtVector) -> String {
-        thought.iter()
+        thought
+            .iter()
             .map(|&x| {
                 let char_code = ((x + 1.0) * 32.0 + 64.0) as u8;
                 char::from(char_code)
