@@ -145,7 +145,7 @@ impl ImageGenerationParams {
             negative_prompt: Some("blurry, low quality, distorted".to_string()),
             width: 512,
             height: 512,
-            num_inference_steps: 30,
+            num_inference_steps: 40,
             guidance_scale: 7.5,
             seed: Some(rand::random())
         }

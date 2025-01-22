@@ -47,35 +47,47 @@ struct DiffusionScheduler {
 
 impl DiffusionScheduler {
     fn new(num_inference_steps: usize) -> Self {
-        // Initialize scheduler parameters
-        let beta_start = 0.00085f32;
-        let beta_end = 0.012f32;
-        let num_train_timesteps = 1000;
-
-
-        let step_size = (num_train_timesteps as f64 / num_inference_steps as f64).round() as usize;
+        let num_train_timesteps = 1000i64;
+        
+        // Cosine schedule betas
+        let betas: Vec<f32> = (0..num_train_timesteps)
+            .map(|t| {
+                let t = t as f32 / num_train_timesteps as f32;
+                let alpha_bar = (((t + 0.008) * std::f32::consts::PI / 2.0).cos()).powi(2);
+                let alpha_bar_prev = if t > 0.0 {
+                    (((t + 0.008 - 1.0 / num_train_timesteps as f32) * std::f32::consts::PI / 2.0).cos()).powi(2)
+                } else {
+                    1.0
+                };
+                (1.0 - alpha_bar / alpha_bar_prev).min(0.999)
+            })
+            .collect();
+    
+        // Calculate step size
+        let step_size = (num_train_timesteps as f64 / num_inference_steps as f64).round() as i64;
+        
+        // Generate timesteps
         let timesteps: Vec<i64> = (0..num_inference_steps)
-            .map(|i| (num_train_timesteps - (i + 1) * step_size) as i64)
+            .map(|i| {
+                let step = (i as i64 + 1) * step_size;
+                num_train_timesteps.saturating_sub(step)
+            })
             .rev()
             .collect();
-        
-
-        println!("Timesteps: {:?}", timesteps);  // Debug print
-
-        let mut betas = Vec::with_capacity(num_train_timesteps);
-        for i in 0..num_train_timesteps {
-            let beta = beta_start + (beta_end - beta_start) * (i as f32 / num_train_timesteps as f32);
-            betas.push(beta);
-        }
-
+    
+        println!("Timesteps: {:?}", timesteps);
+    
+        // Calculate alphas from the cosine betas
         let alphas: Vec<f32> = betas.iter().map(|beta| 1.0 - beta).collect();
-        let mut alphas_cumprod = Vec::with_capacity(num_train_timesteps);
+        
+        // Calculate cumulative product of alphas
+        let mut alphas_cumprod = Vec::with_capacity(num_train_timesteps as usize);
         let mut cumprod = 1.0;
         for alpha in alphas.iter() {
             cumprod *= alpha;
             alphas_cumprod.push(cumprod);
         }
-
+    
         Self {
             timesteps,
             alphas,
@@ -94,23 +106,13 @@ impl DiffusionScheduler {
         latents: &Array4<f32>,
         guidance_scale: f32,
     ) -> Result<Array4<f32>> {
-        println!("Scheduler step for timestep {}", timestep);
-        
         // Split noise predictions
         let noise_pred_uncond = noise_pred.slice(s![0..1, .., .., ..]).to_owned();
         let noise_pred_text = noise_pred.slice(s![1..2, .., .., ..]).to_owned();
         
-        // Print ranges for debugging
-        println!("Uncond noise pred range: {} to {}", 
-            noise_pred_uncond.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            noise_pred_uncond.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
-        println!("Text noise pred range: {} to {}", 
-            noise_pred_text.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            noise_pred_text.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
-    
-        // Perform classifier free guidance
+        // Apply classifier-free guidance with clamping
         let noise_pred_combined = &noise_pred_uncond + 
-            (guidance_scale * (&noise_pred_text - &noise_pred_uncond));
+            guidance_scale * (&noise_pred_text - &noise_pred_uncond);
         
         // Get timestep index
         let timestep_index = self.timesteps.iter()
@@ -119,22 +121,20 @@ impl DiffusionScheduler {
         
         let alpha = self.alphas[timestep_index];
         let alpha_prod = self.alphas_cumprod[timestep_index];
-        let beta = 1.0 - alpha;
-    
+        
         let prev_timestep_index = if timestep_index > 0 { timestep_index - 1 } else { 0 };
         let alpha_prod_prev = self.alphas_cumprod[prev_timestep_index];
-        
-        // Print scheduler parameters for debugging
-        println!("Alpha: {}, Alpha_prod: {}, Beta: {}", alpha, alpha_prod, beta);
     
-        // Perform denoising step
-        let pred_original_sample = (latents - beta.sqrt() * &noise_pred_combined) / alpha.sqrt();
+        // Calculate denoised x0
+        let x0_pred = (latents - ((1.0 - alpha_prod).sqrt() * &noise_pred_combined)) / alpha_prod.sqrt();
         
-        // Calculate previous sample
-        let mut prev_sample = alpha_prod_prev.sqrt() * &pred_original_sample +
-            (1.0 - alpha_prod_prev).sqrt() * &noise_pred_combined;
+        // Calculate direction pointing to x_t
+        let dir_xt = (1.0 - alpha_prod_prev).sqrt() * &noise_pred_combined;
+        
+        // Calculate x_{t-1}
+        let mut prev_sample = alpha_prod_prev.sqrt() * x0_pred + dir_xt;
     
-        // Add noise at non-final timesteps
+        // Add noise if not the last step
         if timestep_index > 0 {
             let noise_shape = prev_sample.raw_dim();
             let normal = Normal::new(0.0, 1.0)
@@ -142,13 +142,11 @@ impl DiffusionScheduler {
             
             let mut rng = rand::thread_rng();
             let noise = Array4::from_shape_simple_fn(noise_shape, || normal.sample(&mut rng) as f32);
-            prev_sample = prev_sample + beta.sqrt() * noise;
+            
+            // Scale noise by sigma_t
+            let sigma = ((1.0 - alpha_prod_prev) / (1.0 - alpha_prod) * (1.0 - alpha_prod / alpha_prod_prev)).sqrt();
+            prev_sample = prev_sample + sigma * noise;
         }
-    
-        // Print output ranges for debugging
-        println!("Denoised sample range: {} to {}", 
-            prev_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            prev_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
         
         Ok(prev_sample)
     }
@@ -463,50 +461,37 @@ impl ImageService {
         let normal = Normal::new(0.0, 1.0)
             .map_err(|_e| NFTError::ProcessingError("Failed to create normal distribution".to_string()))?;
     
-        // Initialize with batch_size of 1
-        let shape = [
-            1, 
-            LATENT_CHANNELS,
-            LATENT_HEIGHT,
-            LATENT_WIDTH
-        ];
-    
+        let shape = [1, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH];
         let mut latents = Array4::<f32>::zeros(shape);
         for item in latents.iter_mut() {
             *item = normal.sample(&mut rng) as f32;
         }
     
+        // Scale initial latents
+        latents.mapv_inplace(|x| x / 0.18215);
         Ok(latents)
     }
 
     fn prepare_latent_input(&self, latents: &Array4<f32>, _timestep: i64) -> Result<Array4<f32>> {
-        // Create array with batch size 2
+        // Just duplicate, no scaling since latents are already scaled
         let mut duplicated = Array4::<f32>::zeros([2, LATENT_CHANNELS, LATENT_HEIGHT, LATENT_WIDTH]);
-        
-        // Copy the single batch to both positions
-        duplicated.slice_mut(s![0..1, .., .., ..]).assign(&latents.slice(s![0..1, .., .., ..]));
-        duplicated.slice_mut(s![1..2, .., .., ..]).assign(&latents.slice(s![0..1, .., .., ..]));
-        
-        
+        duplicated.slice_mut(s![0..1, .., .., ..]).assign(&latents);
+        duplicated.slice_mut(s![1..2, .., .., ..]).assign(&latents);
         Ok(duplicated)
     }
 
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
-        // Take first batch and scale appropriately
+        // Take first batch - latents are already scaled
         let latents_slice = latents.slice(s![0..1, .., .., ..]).to_owned();
-        let mut scaled_latents = latents_slice;
         
-
-        scaled_latents.mapv_inplace(|x| x / 0.18215);
-        
-        println!("VAE input ranges: {} to {}", 
-            scaled_latents.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            scaled_latents.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+        println!("VAE input ranges: {} to {}",
+            latents_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            latents_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
     
-        let scaled_latents_dyn = scaled_latents.into_dyn();
-        let scaled_latents_cow = CowArray::from(&scaled_latents_dyn);
+        let latents_dyn = latents_slice.into_dyn();
+        let latents_cow = CowArray::from(&latents_dyn);
     
-        let vae_input = Value::from_array(self.vae_decoder.allocator(), &scaled_latents_cow)
+        let vae_input = Value::from_array(self.vae_decoder.allocator(), &latents_cow)
             .map_err(|_e| NFTError::ProcessingError("Failed to create VAE input".to_string()))?;
     
         let outputs = self.vae_decoder.run(vec![vae_input])
@@ -538,8 +523,8 @@ impl ImageService {
         for y in 0..height {
             for x in 0..width {
                 let r = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
-                let g = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
-                let b = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
+                let g = ((array[[0, 1, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
+                let b = ((array[[0, 2, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
                 
                 img.put_pixel(x as u32, y as u32, Rgb([
                     r as u8,
