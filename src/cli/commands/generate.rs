@@ -1,6 +1,6 @@
 use crate::{
     brain::master_brain::MasterBrain,
-    models::{Result, SystemConfig, NFTError},
+    models::{NFTError, Result, SystemConfig},
 };
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -24,7 +24,7 @@ pub struct GenerateArgs {
 }
 
 impl GenerateArgs {
-    pub fn execute(&self, master_brain: &mut MasterBrain) -> Result<()> {
+    pub async fn execute(&self, master_brain: &mut MasterBrain) -> Result<()> {
         // Initialize progress bar
         let pb = ProgressBar::new(100);
         pb.set_style(
@@ -48,15 +48,15 @@ impl GenerateArgs {
         pb.set_message("Starting image generation...");
 
         // Generate NFT (image + metadata)
-        let result = master_brain.generate_nft(self.prompt.clone(), Some(pb.clone()))?;
+        let result = master_brain
+            .generate_nft(self.prompt.clone(), Some(pb.clone()))
+            .await?;
 
         pb.set_message("Saving generated image...");
-        fs::create_dir_all(&self.output_dir)
-            .map_err(|e| NFTError::FileSystemError(e))?;
+        fs::create_dir_all(&self.output_dir).map_err(|e| NFTError::FileSystemError(e))?;
 
         let output_path = self.output_dir.join("generated_nft.png");
-        fs::copy(&result.image_path, &output_path)
-            .map_err(|e| NFTError::FileSystemError(e))?;
+        fs::copy(&result.image_path, &output_path).map_err(|e| NFTError::FileSystemError(e))?;
 
         pb.finish_with_message(format!(
             "✅ Image successfully generated: {}",

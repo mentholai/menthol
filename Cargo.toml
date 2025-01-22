@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Web framework (if we still need it)
-actix-web = "4.4"
-actix-cors = "0.6"
+
 ndarray-linalg = { version = "0.16", features = ["intel-mkl"] } 
+
+llama_cpp = "0.3.1"
 
 # Async runtime
 tokio = { version = "1.28", features = ["full"] }

@@ -1,8 +1,11 @@
-use crate::models::{ComputeDevice, GenerationConfig, GenerationParameters, GenerationResult, ImageFormat, OutputConfig, Result};
-use crate::services::ImageService;
 use super::types::*;
-use std::path::PathBuf;
+use crate::models::{
+    ComputeDevice, GenerationConfig, GenerationParameters, GenerationResult, ImageFormat,
+    OutputConfig, Result,
+};
+use crate::services::ImageService;
 use rand::Rng;
+use std::path::PathBuf;
 
 struct NoiseGenerator {
     seed: u64,
@@ -13,7 +16,7 @@ pub struct ImageProcessor {
     noise_generator: NoiseGenerator,
     image_service: ImageService,
     output_path: PathBuf,
-    device: ComputeDevice,  
+    device: ComputeDevice,
 }
 impl NoiseGenerator {
     fn new() -> Self {
@@ -24,7 +27,7 @@ impl NoiseGenerator {
 
     fn apply_noise(&self, params: &mut NoiseParameters) {
         let mut rng = rand::thread_rng();
-        
+
         params.frequency *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
         params.amplitude *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
         params.persistence = (params.persistence + rng.gen::<f64>()) / 2.0;
@@ -37,20 +40,19 @@ impl ImageProcessor {
         Ok(Self {
             style_params: Self::initialize_style_params(),
             noise_generator: NoiseGenerator::new(),
-            image_service: ImageService::new( output_path.clone())?,
+            image_service: ImageService::new(output_path.clone())?,
             output_path,
-            device,  
+            device,
         })
     }
 
     pub fn generate(&mut self, thought_vector: &ThoughtVector) -> Result<GenerationResult> {
-
         let params = self.process_thought_vector(thought_vector);
-        
+
         // Create generation config
         let config = GenerationConfig {
             model_path: PathBuf::from("models"),
-            device: self.device.clone(),  // Use stored device
+            device: self.device.clone(), // Use stored device
             parameters: params.into_generation_parameters(),
             output_config: OutputConfig {
                 output_dir: self.output_path.clone(),
@@ -64,29 +66,54 @@ impl ImageProcessor {
 
     fn initialize_style_params() -> ImageGenerationParams {
         let _rng = rand::thread_rng();
-        
+
         ImageGenerationParams {
             style_vector: vec![
-                0.8,  // Cyberpunk intensity
-                0.7,  // Neon glow
-                0.9,  // Urban decay
-                0.6   // Tech complexity
+                0.8, // Cyberpunk intensity
+                0.7, // Neon glow
+                0.9, // Urban decay
+                0.6, // Tech complexity
             ],
             composition_weights: vec![
                 0.75, // Foreground emphasis
                 0.60, // Background complexity
                 0.85, // Contrast ratio
-                0.70  // Detail density
+                0.70, // Detail density
             ],
             color_palette: ColorPalette {
                 primary_colors: vec![
-                    RGB { r: 0, g: 255, b: 196, weight: 0.8 },   // Cyber green
-                    RGB { r: 255, g: 0, b: 128, weight: 0.7 },   // Neon pink
-                    RGB { r: 0, g: 196, b: 255, weight: 0.6 },   // Electric blue
+                    RGB {
+                        r: 0,
+                        g: 255,
+                        b: 196,
+                        weight: 0.8,
+                    }, // Cyber green
+                    RGB {
+                        r: 255,
+                        g: 0,
+                        b: 128,
+                        weight: 0.7,
+                    }, // Neon pink
+                    RGB {
+                        r: 0,
+                        g: 196,
+                        b: 255,
+                        weight: 0.6,
+                    }, // Electric blue
                 ],
                 accent_colors: vec![
-                    RGB { r: 255, g: 128, b: 0, weight: 0.5 },   // Neon orange
-                    RGB { r: 128, g: 0, b: 255, weight: 0.4 },   // Deep purple
+                    RGB {
+                        r: 255,
+                        g: 128,
+                        b: 0,
+                        weight: 0.5,
+                    }, // Neon orange
+                    RGB {
+                        r: 128,
+                        g: 0,
+                        b: 255,
+                        weight: 0.4,
+                    }, // Deep purple
                 ],
                 harmony_matrix: vec![
                     vec![1.0, 0.8, 0.6],
@@ -105,19 +132,20 @@ impl ImageProcessor {
 
     pub fn process_thought_vector(&mut self, thought: &ThoughtVector) -> ImageGenerationParams {
         let mut params = self.style_params.clone();
-        
+
         // Modify style based on thought vector
         for (i, &value) in thought.iter().take(4).enumerate() {
             params.style_vector[i] = (params.style_vector[i] + value) / 2.0;
         }
-        
+
         // Generate noise variations
-        self.noise_generator.apply_noise(&mut params.noise_parameters);
-        
+        self.noise_generator
+            .apply_noise(&mut params.noise_parameters);
+
         // Adjust color weights based on thought intensity
         let intensity = thought.iter().sum::<f64>() / thought.len() as f64;
         self.adjust_colors(&mut params.color_palette, intensity);
-        
+
         params
     }
 
@@ -130,7 +158,6 @@ impl ImageProcessor {
         }
     }
 }
-
 
 impl ImageGenerationParams {
     fn into_generation_parameters(self) -> GenerationParameters {

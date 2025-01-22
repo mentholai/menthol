@@ -1,54 +1,44 @@
-use crate::models::{Result, NFTAttribute};
+use crate::models::image_analysis::ImageAnalyzer;
+use crate::models::lore_model::LoreGenerator;
+use crate::models::{NFTAttribute, Result};
 use std::path::PathBuf;
 
 pub struct LoreService {
-    model_path: PathBuf,
-    tokenizer_path: PathBuf,
+    image_analyzer: ImageAnalyzer,
+    lore_generator: LoreGenerator,
 }
 
 impl LoreService {
-    pub fn new(model_path: PathBuf, tokenizer_path: PathBuf) -> Result<Self> {
+    pub fn new(
+        model_path: PathBuf,
+        tokenizer_path: PathBuf,
+        image_model_path: PathBuf,
+    ) -> Result<Self> {
+        let image_analyzer = ImageAnalyzer::new(image_model_path);
+        let lore_generator = LoreGenerator::new(model_path);
+
         Ok(Self {
-            model_path,
-            tokenizer_path,
+            image_analyzer,
+            lore_generator,
         })
     }
 
-    pub fn generate_name(&self, _image_description: &str) -> Result<String> {
-        // TODO: Implement actual name generation
-        // For now, return a placeholder
-        Ok(format!("CyberPunk NFT #{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap()))
+    /// **Analyze image and generate character name**
+    pub fn generate_name(&self, image_path: &PathBuf) -> Result<String> {
+        let image_description = self.image_analyzer.analyze(image_path);
+        let name = self.lore_generator.generate_name(&image_description);
+        Ok(name)
     }
 
-    pub fn generate_description(&self, image_description: &str) -> Result<String> {
-        // TODO: Implement actual description generation
-        // For now, return a placeholder
-        Ok(format!("A unique digital artifact: {}", image_description))
+    /// **Generate full lore for an NFT based on image**
+    pub fn generate_lore(&self, image_path: &PathBuf) -> Result<String> {
+        let image_description = self.image_analyzer.analyze(image_path);
+        let lore = self.lore_generator.generate_lore(&image_description);
+        Ok(lore)
     }
 
-    pub fn generate_attributes(&self, _image_description: &str) -> Result<Vec<NFTAttribute>> {
-        // TODO: Implement actual attribute generation
-        // For now, return placeholder attributes
-        Ok(vec![
-            NFTAttribute {
-                trait_type: "Rarity".to_string(),
-                value: "Legendary".to_string(),
-            },
-            NFTAttribute {
-                trait_type: "Type".to_string(),
-                value: "Cyberpunk".to_string(),
-            },
-        ])
-    }
-
-    pub fn analyze_image(&self, _image_path: &PathBuf) -> Result<String> {
-        // TODO: Implement actual image analysis
-        // For now, return a placeholder
-        Ok("A cyberpunk-themed digital artwork".to_string())
-    }
-
-    fn load_models(&self) -> Result<()> {
-        // TODO: Implement model loading
-        Ok(())
+    /// **Analyze image for description**
+    pub fn analyze_image(&self, image_path: &PathBuf) -> Result<String> {
+        Ok(self.image_analyzer.analyze(image_path))
     }
 }

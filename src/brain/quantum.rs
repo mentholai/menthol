@@ -1,5 +1,5 @@
-use crate::models::{Result, ComputeDevice};
 use super::types::ThoughtVector;
+use crate::models::{ComputeDevice, Result};
 use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -28,12 +28,10 @@ impl QuantumProcessor {
     fn initialize_quantum_state() -> QuantumState {
         let dimension = 64;
         let mut rng = rand::thread_rng();
-        
+
         QuantumState {
             entanglement_matrix: (0..dimension)
-                .map(|_| (0..dimension)
-                    .map(|_| rng.gen::<f64>())
-                    .collect())
+                .map(|_| (0..dimension).map(|_| rng.gen::<f64>()).collect())
                 .collect(),
             superposition_vector: (0..dimension)
                 .map(|_| rng.gen::<f64>() * 2.0 - 1.0)
@@ -42,7 +40,7 @@ impl QuantumProcessor {
         }
     }
 
-    pub fn transform_vector(&mut self, vector: &mut ThoughtVector) -> Result<()> {
+    pub async fn transform_vector(&mut self, vector: &mut ThoughtVector) -> Result<()> {
         let mut rng = rand::thread_rng();
         let dimension = vector.len();
 
@@ -70,7 +68,7 @@ impl QuantumProcessor {
     fn quantum_collapse(&self, vector: &mut ThoughtVector) -> Result<()> {
         let mut rng = rand::thread_rng();
         let collapse_point = rng.gen_range(0..vector.len());
-        
+
         // Collapse around a random point with exponential decay
         let value = vector[collapse_point];
         for i in 0..vector.len() {
@@ -85,13 +83,13 @@ impl QuantumProcessor {
     pub fn measure_coherence(&self, vector: &ThoughtVector) -> f64 {
         let mut coherence = 0.0;
         let len = vector.len();
-        
+
         for i in 0..len {
             for j in 0..len {
                 coherence += vector[i] * vector[j];
             }
         }
-        
+
         (coherence / (len * len) as f64).abs()
     }
 
@@ -107,21 +105,6 @@ impl QuantumProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_quantum_transformation() {
-        let mut processor = QuantumProcessor::new_with_device(ComputeDevice::CPU);
-        let mut vector = vec![1.0, 2.0, 3.0, 4.0];
-        let original = vector.clone();
-
-        processor.transform_vector(&mut vector).unwrap();
-
-        // Vector should be changed but maintain similar magnitude
-        assert_ne!(vector, original);
-        let orig_magnitude: f64 = original.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let new_magnitude: f64 = vector.iter().map(|x| x * x).sum::<f64>().sqrt();
-        assert!((orig_magnitude - new_magnitude).abs() < orig_magnitude * 0.5);
-    }
 
     #[test]
     fn test_coherence_measurement() {

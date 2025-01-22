@@ -7,6 +7,8 @@ Menthol is a revolutionary AI ecosystem that transcends traditional creative bou
 ## 🛠 Quick Installation
 
 ### One-Line Installation
+
+### NOTE! ONE-LINE INSTALLATION IS COMING SOON!!!
 ```bash
 curl -sSL https://raw.githubusercontent.com/mentholai/menthol/main/install.sh | bash
 ```
