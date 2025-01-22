@@ -102,6 +102,8 @@ impl QuantumProcessor {
     }
 }
 
+///NOTE: Quantum functions are strictly for fun, you didnt really think your computer could handle Quantum computing did you?  
+
 #[cfg(test)]
 mod tests {
     use super::*;
