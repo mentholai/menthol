@@ -37,7 +37,7 @@ impl ImageProcessor {
         Ok(Self {
             style_params: Self::initialize_style_params(),
             noise_generator: NoiseGenerator::new(),
-            image_service: ImageService::new(PathBuf::from("models"), output_path.clone())?,
+            image_service: ImageService::new( output_path.clone())?,
             output_path,
             device,  
         })
@@ -145,7 +145,7 @@ impl ImageGenerationParams {
             negative_prompt: Some("blurry, low quality, distorted".to_string()),
             width: 512,
             height: 512,
-            num_inference_steps: 40,
+            num_inference_steps: 25,
             guidance_scale: 7.5,
             seed: Some(rand::random())
         }
