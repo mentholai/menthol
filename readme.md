@@ -174,7 +174,6 @@ Menthol is committed to:
 
 ## 🔗 Connect With Us
 - **GitHub**: [github.com/mentholai/menthol](https://github.com/mentholai/menthol)
-- **Discord**: [Join Our Community](https://discord.gg/menthol)
 - **Twitter**: [@MentholAI](https://twitter.com/mentholai)
 
 
