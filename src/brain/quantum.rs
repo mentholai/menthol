@@ -1,31 +1,32 @@
-use crate::models::ComputeDevice;
-
-use super::types::*;
+use crate::models::{Result, ComputeDevice};
+use super::types::ThoughtVector;
 use rand::Rng;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-pub struct QuantumState {
-    entanglement_matrix: Vec<Vec<f64>>,
-    superposition_vector: Vec<f64>,
-    collapse_probability: f64,
-}
-
 pub struct QuantumProcessor {
     state: Arc<RwLock<QuantumState>>,
+    device: ComputeDevice,
     coherence_threshold: f64,
+}
+
+pub struct QuantumState {
+    pub entanglement_matrix: Vec<Vec<f64>>,
+    pub superposition_vector: Vec<f64>,
+    pub collapse_probability: f64,
 }
 
 impl QuantumProcessor {
     pub fn new_with_device(device: ComputeDevice) -> Self {
-    pub fn new(dimension: usize) -> Self {
         Self {
-            state: Arc::new(RwLock::new(Self::initialize_quantum_state(dimension))),
+            state: Arc::new(RwLock::new(Self::initialize_quantum_state())),
+            device,
             coherence_threshold: 0.7,
         }
     }
 
-    fn initialize_quantum_state(dimension: usize) -> QuantumState {
+    fn initialize_quantum_state() -> QuantumState {
+        let dimension = 64;
         let mut rng = rand::thread_rng();
         
         QuantumState {
@@ -35,77 +36,98 @@ impl QuantumProcessor {
                     .collect())
                 .collect(),
             superposition_vector: (0..dimension)
-                .map(|_| rng.gen::<f64>())
+                .map(|_| rng.gen::<f64>() * 2.0 - 1.0)
                 .collect(),
             collapse_probability: 0.5,
         }
     }
 
-    pub async fn apply_quantum_transformation(&self, thought_vector: &mut ThoughtVector) {
-        let state = self.state.read().await;
-        let dimension = thought_vector.len();
-        
-        let mut entangled_vector = vec![0.0; dimension];
+    pub fn transform_vector(&mut self, vector: &mut ThoughtVector) -> Result<()> {
+        let mut rng = rand::thread_rng();
+        let dimension = vector.len();
+
+        // Apply quantum entanglement
+        let mut entangled = vec![0.0; dimension];
         for i in 0..dimension {
             for j in 0..dimension {
-                entangled_vector[i] += thought_vector[j] * state.entanglement_matrix[i][j];
+                entangled[i] += vector[j] * rng.gen::<f64>();
             }
         }
-        
-        for i in 0..dimension {
-            thought_vector[i] = (thought_vector[i] + entangled_vector[i]) * 0.5
-                + state.superposition_vector[i] * 0.1;
-        }
-        
 
-        if rand::random::<f64>() < state.collapse_probability {
-            self.quantum_collapse(thought_vector).await;
+        // Apply superposition
+        for i in 0..dimension {
+            vector[i] = (vector[i] + entangled[i]) * 0.5 + (rng.gen::<f64>() * 2.0 - 1.0) * 0.1;
         }
+
+        // Random quantum collapse
+        if rng.gen::<f64>() < 0.3 {
+            self.quantum_collapse(vector)?;
+        }
+
+        Ok(())
     }
 
-    async fn quantum_collapse(&self, vector: &mut ThoughtVector) {
+    fn quantum_collapse(&self, vector: &mut ThoughtVector) -> Result<()> {
         let mut rng = rand::thread_rng();
         let collapse_point = rng.gen_range(0..vector.len());
         
+        // Collapse around a random point with exponential decay
         let value = vector[collapse_point];
         for i in 0..vector.len() {
             let distance = (i as f64 - collapse_point as f64).abs();
             let collapse_factor = (-distance * 0.1).exp();
             vector[i] = vector[i] * (1.0 - collapse_factor) + value * collapse_factor;
         }
+
+        Ok(())
     }
 
-    pub async fn measure_coherence(&self, vector: &ThoughtVector) -> f64 {
-        let state = self.state.read().await;
+    pub fn measure_coherence(&self, vector: &ThoughtVector) -> f64 {
         let mut coherence = 0.0;
+        let len = vector.len();
         
-        for i in 0..vector.len() {
-            for j in 0..vector.len() {
-                coherence += vector[i] * vector[j] * state.entanglement_matrix[i][j];
+        for i in 0..len {
+            for j in 0..len {
+                coherence += vector[i] * vector[j];
             }
         }
         
-        coherence.abs() / (vector.len() as f64)
+        (coherence / (len * len) as f64).abs()
     }
 
-    pub async fn update_quantum_state(&self, coherence: f64) {
-        let mut state = self.state.write().await;
-        let mut rng = rand::thread_rng();
-        
+    pub fn get_device(&self) -> &ComputeDevice {
+        &self.device
+    }
 
-        state.collapse_probability = (1.0 - coherence).max(0.1);
-        
-        for row in state.entanglement_matrix.iter_mut() {
-            for value in row.iter_mut() {
-                *value += (rng.gen::<f64>() - 0.5) * 0.01;
-                *value = value.clamp(0.0, 1.0);
-            }
-        }
-        
-        for value in state.superposition_vector.iter_mut() {
-            *value += (rng.gen::<f64>() - 0.5) * 0.01;
-            *value = value.clamp(-1.0, 1.0);
-        }
+    pub fn get_coherence_threshold(&self) -> f64 {
+        self.coherence_threshold
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_quantum_transformation() {
+        let mut processor = QuantumProcessor::new_with_device(ComputeDevice::CPU);
+        let mut vector = vec![1.0, 2.0, 3.0, 4.0];
+        let original = vector.clone();
+
+        processor.transform_vector(&mut vector).unwrap();
+
+        // Vector should be changed but maintain similar magnitude
+        assert_ne!(vector, original);
+        let orig_magnitude: f64 = original.iter().map(|x| x * x).sum::<f64>().sqrt();
+        let new_magnitude: f64 = vector.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert!((orig_magnitude - new_magnitude).abs() < orig_magnitude * 0.5);
+    }
+
+    #[test]
+    fn test_coherence_measurement() {
+        let processor = QuantumProcessor::new_with_device(ComputeDevice::CPU);
+        let vector = vec![1.0, 1.0, 1.0, 1.0];
+        let coherence = processor.measure_coherence(&vector);
+        assert!(coherence >= 0.0 && coherence <= 1.0);
+    }
 }

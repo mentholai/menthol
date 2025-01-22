@@ -119,7 +119,7 @@ pub struct NFTDefaults {
 pub enum ImageFormat {
     PNG,
     JPEG,
-    WebP,
+    WEBP,
 }
 
 impl SystemConfig {

@@ -1,31 +1,69 @@
-use crate::models::ComputeDevice;
-
+use crate::models::{ComputeDevice, GenerationConfig, GenerationParameters, GenerationResult, ImageFormat, OutputConfig, Result};
+use crate::services::ImageService;
 use super::types::*;
+use std::path::PathBuf;
 use rand::Rng;
-use std::sync::Arc;
+
+struct NoiseGenerator {
+    seed: u64,
+}
 
 pub struct ImageProcessor {
     style_params: ImageGenerationParams,
     noise_generator: NoiseGenerator,
+    image_service: ImageService,
+    output_path: PathBuf,
+    device: ComputeDevice,  
+}
+impl NoiseGenerator {
+    fn new() -> Self {
+        Self {
+            seed: rand::random(),
+        }
+    }
+
+    fn apply_noise(&self, params: &mut NoiseParameters) {
+        let mut rng = rand::thread_rng();
+        
+        params.frequency *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
+        params.amplitude *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
+        params.persistence = (params.persistence + rng.gen::<f64>()) / 2.0;
+    }
 }
 
 impl ImageProcessor {
-    pub fn new_with_device(device: ComputeDevice) -> Self {
-        Self {
+    pub fn new_with_device(device: ComputeDevice) -> Result<Self> {
+        let output_path = PathBuf::from("output"); // This could be configurable
+        Ok(Self {
             style_params: Self::initialize_style_params(),
             noise_generator: NoiseGenerator::new(),
-        }
+            image_service: ImageService::new(PathBuf::from("models"), output_path.clone())?,
+            output_path,
+            device,  
+        })
     }
 
-    pub fn new() -> Self {
-        Self {
-            style_params: Self::initialize_style_params(),
-            noise_generator: NoiseGenerator::new(),
-        }
+    pub fn generate(&mut self, thought_vector: &ThoughtVector) -> Result<GenerationResult> {
+
+        let params = self.process_thought_vector(thought_vector);
+        
+        // Create generation config
+        let config = GenerationConfig {
+            model_path: PathBuf::from("models"),
+            device: self.device.clone(),  // Use stored device
+            parameters: params.into_generation_parameters(),
+            output_config: OutputConfig {
+                output_dir: self.output_path.clone(),
+                file_prefix: "nft".to_string(),
+                format: ImageFormat::PNG,
+            },
+        };
+
+        self.image_service.generate(&config)
     }
 
     fn initialize_style_params() -> ImageGenerationParams {
-        let mut rng = rand::thread_rng();
+        let _rng = rand::thread_rng();
         
         ImageGenerationParams {
             style_vector: vec![
@@ -93,116 +131,23 @@ impl ImageProcessor {
     }
 }
 
-struct NoiseGenerator {
-    seed: u64,
-}
 
-impl NoiseGenerator {
-    fn new() -> Self {
-        Self {
-            seed: rand::random(),
+impl ImageGenerationParams {
+    fn into_generation_parameters(self) -> GenerationParameters {
+        GenerationParameters {
+            prompt: format!(
+                "A cyberpunk scene with intensity {}, neon glow {}, urban decay {}, tech complexity {}",
+                self.style_vector[0],
+                self.style_vector[1],
+                self.style_vector[2],
+                self.style_vector[3]
+            ),
+            negative_prompt: Some("blurry, low quality, distorted".to_string()),
+            width: 512,
+            height: 512,
+            num_inference_steps: 40,
+            guidance_scale: 7.5,
+            seed: Some(rand::random())
         }
-    }
-
-    fn apply_noise(&self, params: &mut NoiseParameters) {
-        let mut rng = rand::thread_rng();
-        
-        params.frequency *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
-        params.amplitude *= 1.0 + (rng.gen::<f64>() - 0.5) * 0.1;
-        params.persistence = (params.persistence + rng.gen::<f64>()) / 2.0;
-    }
-}
-
-pub struct TextProcessor {
-    embedding_dimension: usize,
-    attention_weights: Vec<f64>,
-}
-
-impl TextProcessor {
-    pub fn new(embedding_dimension: usize) -> Self {
-        Self {
-            embedding_dimension,
-            attention_weights: vec![1.0; embedding_dimension],
-        }
-    }
-
-    pub fn process_input(&mut self, input: &str) -> ThoughtVector {
-        let mut thought = vec![0.0; self.embedding_dimension];
-        let chars: Vec<char> = input.chars().collect();
-        
-        // Create pseudo-embeddings from character codes
-        for (i, &c) in chars.iter().enumerate() {
-            let pos = i % self.embedding_dimension;
-            thought[pos] += (c as u32 as f64) / 1000.0;
-        }
-        
-        // Apply attention weights
-        for i in 0..self.embedding_dimension {
-            thought[i] *= self.attention_weights[i];
-        }
-        
-        // Normalize
-        let sum: f64 = thought.iter().sum();
-        if sum != 0.0 {
-            for value in thought.iter_mut() {
-                *value /= sum;
-            }
-        }
-        
-        thought
-    }
-
-    pub fn update_attention(&mut self, thought: &ThoughtVector) {
-        // Update attention weights based on thought vector
-        for (weight, &thought_val) in self.attention_weights.iter_mut()
-            .zip(thought.iter()) {
-            *weight = (*weight + thought_val.abs()) / 2.0;
-        }
-    }
-}
-
-pub struct ConsciousnessProcessor {
-    threshold: f64,
-    stability_factor: f64,
-    history: Vec<ConsciousnessLevel>,
-}
-
-impl ConsciousnessProcessor {
-    pub fn new(threshold: f64) -> Self {
-        Self {
-            threshold,
-            stability_factor: 0.95,
-            history: Vec::with_capacity(100),
-        }
-    }
-
-    pub fn evaluate_consciousness(&mut self, thought: &ThoughtVector) -> ConsciousnessLevel {
-        let raw_consciousness = self.calculate_raw_consciousness(thought);
-        let stable_consciousness = self.stabilize_consciousness(raw_consciousness);
-        
-        self.history.push(stable_consciousness);
-        if self.history.len() > 100 {
-            self.history.remove(0);
-        }
-        
-        stable_consciousness
-    }
-
-    fn calculate_raw_consciousness(&self, thought: &ThoughtVector) -> f64 {
-        let magnitude: f64 = thought.iter().map(|x| x * x).sum::<f64>().sqrt();
-        let complexity: f64 = thought.windows(2)
-            .map(|w| (w[1] - w[0]).abs())
-            .sum::<f64>() / thought.len() as f64;
-        
-        (magnitude * complexity).min(1.0)
-    }
-
-    fn stabilize_consciousness(&self, raw: f64) -> f64 {
-        if self.history.is_empty() {
-            return raw;
-        }
-        
-        let previous = self.history[self.history.len() - 1];
-        previous * self.stability_factor + raw * (1.0 - self.stability_factor)
     }
 }

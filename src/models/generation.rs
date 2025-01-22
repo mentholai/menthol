@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use super::ImageFormat;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GenerationConfig {
     pub model_path: PathBuf,
@@ -35,7 +37,7 @@ pub struct OutputConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ImageFormat {
+pub enum ImageType {
     PNG,
     JPEG(u8), // quality
 }

@@ -3,11 +3,7 @@ use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     signature::{Keypair, Signer},
-    system_instruction,
-    transaction::Transaction,
 };
-use std::str::FromStr;
-
 pub struct SolanaService {
     client: RpcClient,
     keypair: Keypair,
@@ -55,26 +51,26 @@ impl SolanaService {
         Ok(signature)
     }
 
-    fn calculate_fees(&self, nft: &NFT) -> Result<u64> {
+    fn calculate_fees(&self, _nft: &NFT) -> Result<u64> {
         // TODO: Implement actual fee calculation
         Ok(5000) // Placeholder amount in lamports
     }
 
-    async fn upload_to_arweave(&self, nft: &NFT) -> Result<String> {
+    async fn upload_to_arweave(&self, _nft: &NFT) -> Result<String> {
         // TODO: Implement actual Arweave upload
         Ok(format!("https://arweave.net/{}", uuid::Uuid::new_v4()))
     }
 
-    fn create_metadata(&self, nft: &NFT, uri: &str) -> Result<Vec<u8>> {
+    fn create_metadata(&self, _nft: &NFT, _uri: &str) -> Result<Vec<u8>> {
         // TODO: Implement actual metadata creation
         Ok(Vec::new())
     }
 
     fn send_mint_transaction(
         &self,
-        mint_account: &Keypair,
-        metadata: &[u8],
-        fees: u64,
+        _mint_account: &Keypair,
+        _metadata: &[u8],
+        _fees: u64,
     ) -> Result<String> {
         // TODO: Implement actual transaction sending
         Ok(uuid::Uuid::new_v4().to_string())
