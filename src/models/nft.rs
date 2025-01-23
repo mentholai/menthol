@@ -3,9 +3,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NFT {
-    pub name: String,
+   // pub name: String,
     pub symbol: String,
-    pub description: String,
+   // pub description: String,
     pub image_uri: String,
     pub attributes: Vec<NFTAttribute>,
     pub collection: NFTCollection,

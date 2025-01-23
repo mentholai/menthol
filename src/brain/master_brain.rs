@@ -17,24 +17,24 @@ pub struct MasterBrain {
     image_processor: ImageProcessor,
     text_processor: TextProcessor,
     consciousness_processor: ConsciousnessProcessor,
-    lore_generator: LoreGenerator,
-    image_analyzer: ImageAnalyzer,
+   // lore_generator: LoreGenerator,
+   // image_analyzer: ImageAnalyzer,
 }
 
 impl MasterBrain {
     pub fn new(config: SystemConfig) -> Result<Self> {
         // Initialize with specific device
         let device = Self::determine_compute_device(&config.resources.compute);
-        let lore_model_path = PathBuf::from("models/mistral.gguf");
-        let image_model_path = PathBuf::from("models/clip.onnx");
+    //    let lore_model_path = PathBuf::from("models/mistral.gguf");
+    //    let image_model_path = PathBuf::from("models/clip.onnx");
         Ok(Self {
             neural_processor: AdvancedNeuralProcessor::new_with_device(device.clone()),
             quantum_processor: QuantumProcessor::new_with_device(device.clone()),
             image_processor: ImageProcessor::new_with_device(device.clone())?,
             text_processor: TextProcessor::new(512),
             consciousness_processor: ConsciousnessProcessor::new(0.7),
-            lore_generator: LoreGenerator::new(lore_model_path),
-            image_analyzer: ImageAnalyzer::new(image_model_path),
+          //  lore_generator: LoreGenerator::new(lore_model_path),
+          //  image_analyzer: ImageAnalyzer::new(image_model_path),
             config,
         })
     }
@@ -82,13 +82,14 @@ impl MasterBrain {
         progress.inc(40);
 
         // 🔥 Analyze the image and generate lore
-        progress.set_message("Analyzing image and generating lore...");
-        let metadata = self.generate_metadata(&image_result).await?;
-        progress.inc(20);
-
+       // progress.set_message("Analyzing image and generating lore...");
+       // let metadata = self.generate_metadata(&image_result).await?;
+       // progress.inc(20);
+//
         // Save results
         progress.set_message("Saving results...");
-        let result = self.save_generation(image_result, metadata)?;
+        //let result = self.save_generation(image_result, metadata)?;
+        let result = self.save_generation(image_result)?;
         progress.inc(10);
 
         progress.finish_with_message("NFT generation complete!");
@@ -98,17 +99,17 @@ impl MasterBrain {
 
     async fn generate_metadata(&mut self, result: &GenerationResult) -> Result<NFT> {
         // Analyze image to get a description
-        let image_description = self.image_analyzer.analyze(&result.image_path);
+       // let image_description = self.image_analyzer.analyze(&result.image_path);
 
-        let name = self.generate_name(&image_description).await?;
-        let lore = self.generate_description(&image_description).await?;
+       // let name = self.generate_name(&image_description).await?;
+       // let lore = self.generate_description(&image_description).await?;
 
         let defaults = &self.config.generation.nft;
 
         Ok(NFT {
-            name,
+           // name,
             symbol: defaults.symbol.clone(),
-            description: lore, // Use generated lore as description
+           // description: lore, // Use generated lore as description
             image_uri: result.image_path.to_string_lossy().to_string(),
             attributes: [].into(),
             collection: NFTCollection {
@@ -120,38 +121,38 @@ impl MasterBrain {
         })
     }
 
-    async fn generate_name(&mut self, prompt: &str) -> Result<String> {
-        let name = self.lore_generator.generate_name(prompt);
+   // async fn generate_name(&mut self, prompt: &str) -> Result<String> {
+   //     let name = self.lore_generator.generate_name(prompt);
+//
+   //     let mut name_vector = self.neural_processor.process_thought(&name).await;
+//
+   //     self.quantum_processor
+   //         .transform_vector(&mut name_vector)
+   //         .await?;
+//
+   //     let name = name_vector
+   //         .iter()
+   //         .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8 as char)
+   //         .collect::<String>();
+//
+   //     Ok(name)
+   // }
 
-        let mut name_vector = self.neural_processor.process_thought(&name).await;
-
-        self.quantum_processor
-            .transform_vector(&mut name_vector)
-            .await?;
-
-        let name = name_vector
-            .iter()
-            .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8 as char)
-            .collect::<String>();
-
-        Ok(name)
-    }
-
-    async fn generate_description(&mut self, prompt: &str) -> Result<String> {
-        let description = self.lore_generator.generate_lore(prompt);
-
-        let mut thought_vector = self.neural_processor.process_thought(&description).await;
-        self.quantum_processor
-            .transform_vector(&mut thought_vector)
-            .await?;
-
-        let description = thought_vector
-            .iter()
-            .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8 as char)
-            .collect::<String>();
-
-        Ok(description)
-    }
+   // async fn generate_description(&mut self, prompt: &str) -> Result<String> {
+   //     let description = self.lore_generator.generate_lore(prompt);
+//
+   //     let mut thought_vector = self.neural_processor.process_thought(&description).await;
+   //     self.quantum_processor
+   //         .transform_vector(&mut thought_vector)
+   //         .await?;
+//
+   //     let description = thought_vector
+   //         .iter()
+   //         .map(|&x| (x * 255.0).clamp(0.0, 255.0) as u8 as char)
+   //         .collect::<String>();
+//
+   //     Ok(description)
+   // }
     fn generate_technical_metadata(
         &self,
         result: &GenerationResult,
@@ -174,18 +175,20 @@ impl MasterBrain {
         })
     }
 
-    fn save_generation(&self, result: GenerationResult, metadata: NFT) -> Result<GenerationResult> {
+    //fn save_generation(&self, result: GenerationResult, metadata: NFT) -> Result<GenerationResult> {
+        fn save_generation(&self, result: GenerationResult) -> Result<GenerationResult> {
+    
         // Save image and metadata to configured paths
         let output_dir = &self.config.storage.output_dir;
         std::fs::create_dir_all(output_dir).map_err(|e| NFTError::FileSystemError(e))?;
 
         // Save metadata
-        let metadata_path = output_dir.join("metadata.json");
-        std::fs::write(
-            &metadata_path,
-            serde_json::to_string_pretty(&metadata).map_err(|e| NFTError::SerializationError(e))?,
-        )
-        .map_err(|e| NFTError::FileSystemError(e))?;
+       // let metadata_path = output_dir.join("metadata.json");
+       //std::fs::write(
+       //    &metadata_path,
+       //    serde_json::to_string_pretty(&metadata).map_err(|e| NFTError::SerializationError(e))?,
+       //)
+       //.map_err(|e| NFTError::FileSystemError(e))?;
 
         Ok(result)
     }

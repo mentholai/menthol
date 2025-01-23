@@ -74,40 +74,39 @@ impl PNDMScheduler {
             alphas_cumprod.push(cumprod);
         }
 
-        // Calculate PNDM specific timesteps
-        let mut timesteps = Vec::new();
+        // Calculate timesteps exactly like the Python version
         let step_size = num_train_timesteps / (num_inference_steps as i64);
-
-        // Start from the highest timestep
+        
+        // Generate base timesteps - start from the highest timestep
+        let mut base_timesteps = Vec::new();
         for i in (0..=num_inference_steps).rev() {
-            timesteps.push(i as i64 * step_size);
+            let timestep = (i as i64 * step_size).min(num_train_timesteps - 1);
+            base_timesteps.push(timestep);
         }
-        let mut base_timesteps: Vec<i64> = Vec::new();
-        // Generate base timesteps (half of target since we'll duplicate)
-        for i in (0..=num_inference_steps / 2).rev() {
-            base_timesteps.push((i as i64 * step_size * 2).min(num_train_timesteps - 1));
-        }
+        
+        // Take every second timestep to get the base sequence
+        let mut pndm_timesteps: Vec<i64> = base_timesteps
+            .iter()
+            .step_by(2)
+            .copied()
+            .collect();
 
-        // Create final timesteps with duplicates and ensure we end at 0
+        // Create final timesteps sequence with duplicates
         let mut final_timesteps = Vec::new();
-        for &t in &base_timesteps[..base_timesteps.len() - 1] {
+        for &t in &pndm_timesteps[..pndm_timesteps.len() - 1] {
             final_timesteps.push(t);
             final_timesteps.push(t);
         }
-        final_timesteps.push(0); // Ensure we end at 0
-        let copied_cumprod = alphas_cumprod.clone();
+        final_timesteps.push(1); 
+        let cloned_cumprods = alphas_cumprod.clone();
         Self {
             timesteps: final_timesteps,
             alphas,
-            alphas_cumprod: copied_cumprod,
+            alphas_cumprod: cloned_cumprods,
             final_alpha_cumprod: alphas_cumprod[alphas_cumprod.len() - 1],
             num_inference_steps,
             num_train_timesteps,
         }
-    }
-
-    fn timesteps(&self) -> &[i64] {
-        &self.timesteps
     }
 
     fn step(
@@ -122,18 +121,16 @@ impl PNDMScheduler {
         let noise_pred_text = noise_pred.slice(s![1..2, .., .., ..]).to_owned();
 
         // Apply classifier-free guidance
-        let noise_pred =
+        let noise_pred = 
             &noise_pred_uncond + guidance_scale * (&noise_pred_text - &noise_pred_uncond);
 
-        // Convert timestep to index in our schedule
+        // Get current timestep index
         let timestep_idx = if timestep == 0 {
             0
         } else {
-            ((timestep - 1) / (self.num_train_timesteps / 1000)) as usize
+            ((timestep as f32 / 1000.0) * (self.alphas_cumprod.len() - 1) as f32) as usize
         };
-        let timestep_idx = timestep_idx.min(self.alphas_cumprod.len() - 1);
 
-        // Get alpha values
         let alpha_prod_t = self.alphas_cumprod[timestep_idx];
         let alpha_prod_t_prev = if timestep_idx > 0 {
             self.alphas_cumprod[timestep_idx - 1]
@@ -144,36 +141,32 @@ impl PNDMScheduler {
         let beta_prod_t = 1.0 - alpha_prod_t;
         let beta_prod_t_prev = 1.0 - alpha_prod_t_prev;
 
-        // Compute predicted original sample from predicted noise
+        // Compute predicted original sample
         let pred_original_sample =
             (latents - (beta_prod_t.sqrt() * &noise_pred)) / alpha_prod_t.sqrt();
 
         // Direction pointing to x_t
-        let dir_xt = (beta_prod_t_prev.sqrt()) * noise_pred;
+        let dir_xt = (beta_prod_t_prev.sqrt()) * &noise_pred;
 
-        // Random noise for stochastic sampling
-        let noise_shape = latents.raw_dim();
-        let noise = match rand_distr::Normal::new(0.0f32, 1.0) {
-            Ok(dist) => {
-                let mut rng = rand::thread_rng();
-                Array4::from_shape_simple_fn(noise_shape, || dist.sample(&mut rng))
-            }
-            Err(_) => {
-                return Err(NFTError::ProcessingError(
-                    "Failed to create noise distribution".to_string(),
-                ))
-            }
-        };
+        let variance = ((beta_prod_t_prev / beta_prod_t) * (1.0 - alpha_prod_t / alpha_prod_t_prev)).max(0.0).sqrt();
+        
+        // Add noise
+        let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
+        let mut rng = rand::thread_rng();
+        let noise = Array4::from_shape_simple_fn(
+            latents.raw_dim(),
+            || normal.sample(&mut rng)
+        );
 
-        // Add noise scaled by the variance
-        let variance =
-            ((beta_prod_t_prev / beta_prod_t) * (1.0 - alpha_prod_t / alpha_prod_t_prev)).sqrt();
-
-        let prev_sample =
+        let prev_sample = 
             alpha_prod_t_prev.sqrt() * pred_original_sample + dir_xt + variance * noise;
 
         Ok(prev_sample)
     }
+    fn timesteps(&self) -> &[i64] {
+        &self.timesteps
+    }
+
 }
 
 pub struct ImageService {
@@ -466,7 +459,6 @@ impl ImageService {
         for item in latents.iter_mut() {
             *item = normal.sample(&mut rng) as f32;
         }
-        latents = latents.mapv(|x| x / 0.18215);
         Ok(latents)
     }
 
@@ -480,7 +472,7 @@ impl ImageService {
 
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
         // Scale latents for VAE
-        let scaled_latents = latents.mapv(|x| x / 0.18215);
+        let scaled_latents = latents.mapv(|x| x * 0.18215);
         let latents_slice = scaled_latents.slice(s![0..1, .., .., ..]).to_owned();
 
         let latents_dyn = latents_slice.into_dyn();
