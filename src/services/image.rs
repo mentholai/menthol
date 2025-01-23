@@ -92,11 +92,11 @@ impl PNDMScheduler {
             final_timesteps.push(t);
         }
         final_timesteps.push(0); // End with 0
-        let cloned_cumprods = alphas_cumprod.clone();
+        let cloned_cumprod = alphas_cumprod.clone();
         Self {
             timesteps: final_timesteps,
             alphas,
-            alphas_cumprod: cloned_cumprods,
+            alphas_cumprod: cloned_cumprod,
             final_alpha_cumprod: alphas_cumprod[alphas_cumprod.len() - 1],
             num_inference_steps,
             num_train_timesteps,
@@ -115,16 +115,11 @@ impl PNDMScheduler {
         let noise_pred_text = noise_pred.slice(s![1..2, .., .., ..]).to_owned();
 
         // Apply classifier-free guidance
-        let noise_pred = 
-            &noise_pred_uncond + guidance_scale * (&noise_pred_text - &noise_pred_uncond);
+        let noise_pred = noise_pred_uncond.clone() + 
+            guidance_scale * (noise_pred_text - noise_pred_uncond);
 
-        // Get current timestep index
-        let timestep_idx = if timestep == 0 {
-            0
-        } else {
-            ((timestep as f32 / 1000.0) * (self.alphas_cumprod.len() - 1) as f32) as usize
-        };
-
+        let timestep_idx = timestep as usize;
+        
         let alpha_prod_t = self.alphas_cumprod[timestep_idx];
         let alpha_prod_t_prev = if timestep_idx > 0 {
             self.alphas_cumprod[timestep_idx - 1]
@@ -136,24 +131,24 @@ impl PNDMScheduler {
         let beta_prod_t_prev = 1.0 - alpha_prod_t_prev;
 
         // Compute predicted original sample
-        let pred_original_sample =
+        let pred_original_sample = 
             (latents - (beta_prod_t.sqrt() * &noise_pred)) / alpha_prod_t.sqrt();
 
-        // Direction pointing to x_t
-        let dir_xt = (beta_prod_t_prev.sqrt()) * &noise_pred;
-
-        let variance = ((beta_prod_t_prev / beta_prod_t) * (1.0 - alpha_prod_t / alpha_prod_t_prev)).max(0.0).sqrt();
-        
-        // Add noise
-        let normal = rand_distr::Normal::new(0.0f32, 1.0).unwrap();
-        let mut rng = rand::thread_rng();
-        let noise = Array4::from_shape_simple_fn(
-            latents.raw_dim(),
-            || normal.sample(&mut rng)
-        );
-
+        // Get previous sample
         let prev_sample = 
-            alpha_prod_t_prev.sqrt() * pred_original_sample + dir_xt + variance * noise;
+            alpha_prod_t_prev.sqrt() * pred_original_sample.clone() +
+            beta_prod_t_prev.sqrt() * &noise_pred;
+
+        println!("Denoising step stats:");
+        println!("  Noise pred range: {} to {}", 
+            noise_pred.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            noise_pred.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+        println!("  Pred original range: {} to {}", 
+            pred_original_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            pred_original_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
+        println!("  Prev sample range: {} to {}", 
+            prev_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            prev_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
 
         Ok(prev_sample)
     }
@@ -240,7 +235,6 @@ impl ImageService {
                 .map_err(|e| NFTError::ModelLoadError(e.to_string().into()))?,
         );
 
-        // Use the onnx_sd directory that we created with the Python script
         let base_path = PathBuf::from("onnx_sd");
         let text_encoder_path = base_path.join("text_encoder").join("model.onnx");
         let unet_path = base_path.join("unet").join("model.onnx");
@@ -377,30 +371,28 @@ impl ImageService {
     }
 
     fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array3<f32>> {
-        println!("Encoding prompt: '{}', negative: '{}'", prompt, negative_prompt);
-        
-        // Tokenize prompts
-        let tokens = self
-            .tokenizer
-            .encode(prompt, true)
+        println!("\nEncoding positive prompt tokens...");
+        let tokens = self.tokenizer.encode(prompt, true)
             .map_err(|e| NFTError::ProcessingError(format!("Tokenization failed: {:?}", e)))?;
-        let neg_tokens = self.tokenizer.encode(negative_prompt, true).map_err(|e| {
-            NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e))
-        })?;
+        
+        println!("\nEncoding negative prompt tokens...");
+        let neg_tokens = self.tokenizer.encode(negative_prompt, true)
+            .map_err(|e| NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e)))?;
     
         let token_ids = tokens.get_ids();
         let neg_token_ids = neg_tokens.get_ids();
     
-        println!("Positive token length: {}", token_ids.len());
-        println!("First few positive tokens: {:?}", &token_ids[..token_ids.len().min(5)]);
-        println!("Negative token length: {}", neg_token_ids.len());
+        // Debug prints
+        println!("\nToken details:");
+        println!("Positive tokens: {:?}", &token_ids[..token_ids.len().min(10)]);  // First 10 tokens
+        println!("Attention mask: {:?}", tokens.get_attention_mask()[..10].to_vec());
+        println!("Negative tokens: {:?}", &neg_token_ids[..neg_token_ids.len().min(10)]);
     
-        // Create input array with shape [2, MAX_TEXT_LENGTH]
+        // Rest of your encoding function...
         let mut input_ids = vec![0i32; MAX_TEXT_LENGTH * 2];
         let token_len = token_ids.len().min(MAX_TEXT_LENGTH);
         let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
     
-        // Convert to i32 and copy to input array
         input_ids[..token_len].copy_from_slice(
             &token_ids[..token_len]
                 .iter()
@@ -414,49 +406,33 @@ impl ImageService {
                 .collect::<Vec<_>>(),
         );
     
+        // Create and verify input tensor shape
         let input_tensor = ndarray::Array2::from_shape_vec((2, MAX_TEXT_LENGTH), input_ids)
-            .map_err(|e| {
-                NFTError::ProcessingError(format!("Failed to create input tensor: {:?}", e))
-            })?;
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create input tensor: {:?}", e)))?;
+        
+        println!("\nInput tensor shape: {:?}", input_tensor.shape());
     
-        // Run text encoder
+        // Proceed with text encoder inference...
         let input_tensor_dyn = input_tensor.into_dyn();
         let binding = CowArray::from(&input_tensor_dyn);
-        let input = Value::from_array(self.text_encoder.allocator(), &binding).map_err(|e| {
-            NFTError::ProcessingError(format!("Failed to create input value: {:?}", e))
-        })?;
+        let input = Value::from_array(self.text_encoder.allocator(), &binding)
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to create input value: {:?}", e)))?;
     
-        let outputs = self.text_encoder.run(vec![input]).map_err(|e| {
-            NFTError::ProcessingError(format!("Text encoder inference failed: {:?}", e))
-        })?;
+        let outputs = self.text_encoder.run(vec![input])
+            .map_err(|e| NFTError::ProcessingError(format!("Text encoder inference failed: {:?}", e)))?;
     
-        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract().map_err(|e| {
-            NFTError::ProcessingError(format!("Failed to extract last_hidden_state: {:?}", e))
-        })?;
+        let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract()
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to extract last_hidden_state: {:?}", e)))?;
     
-        // Shape to [2, 77, 768]
         let embeddings = Array::from_iter(extracted_tensor.view().iter().copied())
             .into_shape((2, MAX_TEXT_LENGTH, 768))
-            .map_err(|e| {
-                NFTError::ProcessingError(format!("Failed to reshape text embeddings: {:?}", e))
-            })?;
+            .map_err(|e| NFTError::ProcessingError(format!("Failed to reshape text embeddings: {:?}", e)))?;
     
-        // Print some statistics about the embeddings
-        let mean = embeddings.mean_axis(Axis(2)).unwrap();
-        let std = embeddings.std_axis(Axis(2), 0.0);
-        println!("Embeddings shape: {:?}", embeddings.shape());
-        println!("Embeddings mean range: {} to {}", 
-            mean.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            mean.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
-        );
-        println!("Embeddings std range: {} to {}", 
-            std.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            std.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
-        );
+        println!("\nFinal embeddings shape: {:?}", embeddings.shape());
     
         Ok(embeddings)
     }
-
+    
     fn initialize_latents(&self, batch_size: usize, seed: Option<u64>) -> Result<Array4<f32>> {
         let mut rng = match seed {
             Some(s) => rand::rngs::StdRng::seed_from_u64(s),
@@ -484,59 +460,73 @@ impl ImageService {
     }
 
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
-        // Scale latents for VAE
+        println!("Pre-scaling latents: {} to {}", 
+            latents.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            latents.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+        );
+    
+        // Scale UP by 1/0.18215 before VAE decode
         let scaled_latents = latents.mapv(|x| x / 0.18215);
         let latents_slice = scaled_latents.slice(s![0..1, .., .., ..]).to_owned();
-
+    
+        println!("Post-scaling latents: {} to {}", 
+            latents_slice.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            latents_slice.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+        );
+    
         let latents_dyn = latents_slice.into_dyn();
         let latents_cow = CowArray::from(&latents_dyn);
-
-        // Input name is "latent_sample"
+    
         let vae_input =
             Value::from_array(self.vae_decoder.allocator(), &latents_cow).map_err(|_e| {
                 NFTError::ProcessingError("Failed to create latent_sample tensor".to_string())
             })?;
-
-        // Output name is "sample"
+    
         let outputs = self
             .vae_decoder
             .run(vec![vae_input])
             .map_err(|_e| NFTError::ProcessingError("VAE decoding failed".to_string()))?;
-
+    
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0]
             .try_extract()
             .map_err(|_e| NFTError::ProcessingError("Failed to extract sample".to_string()))?;
-
-        // Shape to [1, 3, 512, 512]
+    
         let shape = (1, 3, 512, 512);
         let image_array = Array::from_iter(extracted_tensor.view().iter().copied())
             .into_shape(shape)
             .map_err(|e| {
                 NFTError::ProcessingError(format!("Failed to reshape decoded image: {:?}", e))
             })?;
-
+    
+        println!("VAE output range: {} to {}", 
+            image_array.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            image_array.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+        );
+    
         self.array_to_image(&image_array)
     }
-
+    
     fn array_to_image(&self, array: &Array4<f32>) -> Result<RgbImage> {
         let (batch, channels, height, width) = array.dim();
         assert_eq!(channels, 3, "Expected RGB image with 3 channels");
         assert_eq!(batch, 1, "Expected single batch");
-
+    
         let mut img = RgbImage::new(width as u32, height as u32);
-
+    
         for y in 0..height {
             for x in 0..width {
+                // Denormalize from [-1, 1] to [0, 255]
                 let r = ((array[[0, 0, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
                 let g = ((array[[0, 1, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
                 let b = ((array[[0, 2, y, x]] + 1.0) * 0.5).clamp(0.0, 1.0) * 255.0;
-
+    
                 img.put_pixel(x as u32, y as u32, Rgb([r as u8, g as u8, b as u8]));
             }
         }
-
+    
         Ok(img)
     }
+
 
     fn save_image(&self, image: &RgbImage, format: ImageFormat) -> Result<PathBuf> {
         // Create output directory if it doesn't exist
