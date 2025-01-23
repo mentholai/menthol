@@ -74,30 +74,24 @@ impl PNDMScheduler {
             alphas_cumprod.push(cumprod);
         }
 
-        // Calculate timesteps exactly like the Python version
-        let step_size = num_train_timesteps / (num_inference_steps as i64);
+        let target_steps = (num_train_timesteps / num_inference_steps as i64) * num_inference_steps as i64;
+        let mut timesteps: Vec<i64> = Vec::new();
         
-        // Generate base timesteps - start from the highest timestep
-        let mut base_timesteps = Vec::new();
-        for i in (0..=num_inference_steps).rev() {
-            let timestep = (i as i64 * step_size).min(num_train_timesteps - 1);
-            base_timesteps.push(timestep);
+        for i in 0..num_inference_steps {
+            let t = (target_steps - 25) as f32 * (i as f32 / (num_inference_steps - 1) as f32);
+            timesteps.push(t.round() as i64);
         }
         
-        // Take every second timestep to get the base sequence
-        let mut pndm_timesteps: Vec<i64> = base_timesteps
-            .iter()
-            .step_by(2)
-            .copied()
-            .collect();
-
-        // Create final timesteps sequence with duplicates
+        // Sort in descending order and adjust to start from 976
+        timesteps.sort_by(|a, b| b.cmp(a));
+        
+        // Create duplicated timesteps
         let mut final_timesteps = Vec::new();
-        for &t in &pndm_timesteps[..pndm_timesteps.len() - 1] {
+        for &t in &timesteps {
             final_timesteps.push(t);
             final_timesteps.push(t);
         }
-        final_timesteps.push(1); 
+        final_timesteps.push(0); // End with 0
         let cloned_cumprods = alphas_cumprod.clone();
         Self {
             timesteps: final_timesteps,
@@ -383,6 +377,8 @@ impl ImageService {
     }
 
     fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array3<f32>> {
+        println!("Encoding prompt: '{}', negative: '{}'", prompt, negative_prompt);
+        
         // Tokenize prompts
         let tokens = self
             .tokenizer
@@ -391,15 +387,19 @@ impl ImageService {
         let neg_tokens = self.tokenizer.encode(negative_prompt, true).map_err(|e| {
             NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e))
         })?;
-
+    
         let token_ids = tokens.get_ids();
         let neg_token_ids = neg_tokens.get_ids();
-
+    
+        println!("Positive token length: {}", token_ids.len());
+        println!("First few positive tokens: {:?}", &token_ids[..token_ids.len().min(5)]);
+        println!("Negative token length: {}", neg_token_ids.len());
+    
         // Create input array with shape [2, MAX_TEXT_LENGTH]
         let mut input_ids = vec![0i32; MAX_TEXT_LENGTH * 2];
         let token_len = token_ids.len().min(MAX_TEXT_LENGTH);
         let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
-
+    
         // Convert to i32 and copy to input array
         input_ids[..token_len].copy_from_slice(
             &token_ids[..token_len]
@@ -413,34 +413,47 @@ impl ImageService {
                 .map(|&x| x as i32)
                 .collect::<Vec<_>>(),
         );
-
+    
         let input_tensor = ndarray::Array2::from_shape_vec((2, MAX_TEXT_LENGTH), input_ids)
             .map_err(|e| {
                 NFTError::ProcessingError(format!("Failed to create input tensor: {:?}", e))
             })?;
-
+    
+        // Run text encoder
         let input_tensor_dyn = input_tensor.into_dyn();
         let binding = CowArray::from(&input_tensor_dyn);
         let input = Value::from_array(self.text_encoder.allocator(), &binding).map_err(|e| {
             NFTError::ProcessingError(format!("Failed to create input value: {:?}", e))
         })?;
-
-        // Output name is "last_hidden_state"
+    
         let outputs = self.text_encoder.run(vec![input]).map_err(|e| {
             NFTError::ProcessingError(format!("Text encoder inference failed: {:?}", e))
         })?;
-
+    
         let extracted_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract().map_err(|e| {
             NFTError::ProcessingError(format!("Failed to extract last_hidden_state: {:?}", e))
         })?;
-
+    
         // Shape to [2, 77, 768]
         let embeddings = Array::from_iter(extracted_tensor.view().iter().copied())
             .into_shape((2, MAX_TEXT_LENGTH, 768))
             .map_err(|e| {
                 NFTError::ProcessingError(format!("Failed to reshape text embeddings: {:?}", e))
             })?;
-
+    
+        // Print some statistics about the embeddings
+        let mean = embeddings.mean_axis(Axis(2)).unwrap();
+        let std = embeddings.std_axis(Axis(2), 0.0);
+        println!("Embeddings shape: {:?}", embeddings.shape());
+        println!("Embeddings mean range: {} to {}", 
+            mean.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            mean.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+        );
+        println!("Embeddings std range: {} to {}", 
+            std.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
+            std.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b))
+        );
+    
         Ok(embeddings)
     }
 
@@ -472,7 +485,7 @@ impl ImageService {
 
     fn decode_latents(&self, latents: &Array4<f32>) -> Result<RgbImage> {
         // Scale latents for VAE
-        let scaled_latents = latents.mapv(|x| x * 0.18215);
+        let scaled_latents = latents.mapv(|x| x / 0.18215);
         let latents_slice = scaled_latents.slice(s![0..1, .., .., ..]).to_owned();
 
         let latents_dyn = latents_slice.into_dyn();
