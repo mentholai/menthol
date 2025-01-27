@@ -74,27 +74,26 @@ impl PNDMScheduler {
             alphas_cumprod.push(cumprod);
         }
 
-        let target_steps = (num_train_timesteps / num_inference_steps as i64) * num_inference_steps as i64;
+        // Calculate timesteps exactly like Python
         let mut timesteps: Vec<i64> = Vec::new();
+        let step_size = num_train_timesteps / num_inference_steps as i64;
         
-        for i in 0..num_inference_steps {
-            let t = (target_steps - 25) as f32 * (i as f32 / (num_inference_steps - 1) as f32);
-            timesteps.push(t.round() as i64);
+        // Start from (num_train_timesteps - step_size)
+        let mut current = num_train_timesteps - step_size;
+        while current > 0 {
+            timesteps.push(current);
+            timesteps.push(current);  // PNDM needs duplicates
+            current -= step_size;
         }
+        timesteps.push(1);  // End with 1, not 0
         
-        // Sort in descending order and adjust to start from 976
-        timesteps.sort_by(|a, b| b.cmp(a));
-        
-        // Create duplicated timesteps
-        let mut final_timesteps = Vec::new();
-        for &t in &timesteps {
-            final_timesteps.push(t);
-            final_timesteps.push(t);
-        }
-        final_timesteps.push(0); // End with 0
+        println!("PNDM Scheduler initialized:");
+        println!("Step size: {}", step_size);
+        println!("First few timesteps: {:?}", &timesteps[..6]);
+        println!("Total timesteps: {}", timesteps.len());
         let cloned_cumprod = alphas_cumprod.clone();
         Self {
-            timesteps: final_timesteps,
+            timesteps,
             alphas,
             alphas_cumprod: cloned_cumprod,
             final_alpha_cumprod: alphas_cumprod[alphas_cumprod.len() - 1],
@@ -114,12 +113,14 @@ impl PNDMScheduler {
         let noise_pred_uncond = noise_pred.slice(s![0..1, .., .., ..]).to_owned();
         let noise_pred_text = noise_pred.slice(s![1..2, .., .., ..]).to_owned();
 
-        // Apply classifier-free guidance
-        let noise_pred = noise_pred_uncond.clone() + 
-            guidance_scale * (noise_pred_text - noise_pred_uncond);
-
+        // Get absolute timestep index
         let timestep_idx = timestep as usize;
         
+        // Apply classifier-free guidance
+        let noise_pred = &noise_pred_uncond + 
+            guidance_scale * (&noise_pred_text - &noise_pred_uncond);
+
+        // Get alpha values
         let alpha_prod_t = self.alphas_cumprod[timestep_idx];
         let alpha_prod_t_prev = if timestep_idx > 0 {
             self.alphas_cumprod[timestep_idx - 1]
@@ -127,35 +128,36 @@ impl PNDMScheduler {
             1.0
         };
 
-        let beta_prod_t = 1.0 - alpha_prod_t;
-        let beta_prod_t_prev = 1.0 - alpha_prod_t_prev;
-
-        // Compute predicted original sample
+        // Compute predicted original sample from noise prediction
+        let sqrt_alpha_prod_t = alpha_prod_t.sqrt();
+        let sqrt_one_minus_alpha_prod_t = (1.0 - alpha_prod_t).sqrt();
+        
         let pred_original_sample = 
-            (latents - (beta_prod_t.sqrt() * &noise_pred)) / alpha_prod_t.sqrt();
+            (latents - sqrt_one_minus_alpha_prod_t * &noise_pred) / sqrt_alpha_prod_t;
 
-        // Get previous sample
-        let prev_sample = 
-            alpha_prod_t_prev.sqrt() * pred_original_sample.clone() +
-            beta_prod_t_prev.sqrt() * &noise_pred;
+        // Get previous sample by interpolating
+        let sqrt_alpha_prod_t_prev = alpha_prod_t_prev.sqrt();
+        let sqrt_one_minus_alpha_prod_t_prev = (1.0 - alpha_prod_t_prev).sqrt();
 
-        println!("Denoising step stats:");
+        let prev_sample = sqrt_alpha_prod_t_prev * &pred_original_sample + 
+                         sqrt_one_minus_alpha_prod_t_prev * &noise_pred;
+
+        println!("Denoising stats for timestep {}:", timestep);
+        println!("  Alpha prod t: {}", alpha_prod_t);
+        println!("  Alpha prod t-1: {}", alpha_prod_t_prev);
         println!("  Noise pred range: {} to {}", 
             noise_pred.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
             noise_pred.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
-        println!("  Pred original range: {} to {}", 
+        println!("  X0 pred range: {} to {}", 
             pred_original_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
             pred_original_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
-        println!("  Prev sample range: {} to {}", 
-            prev_sample.iter().fold(f32::INFINITY, |a, &b| a.min(b)),
-            prev_sample.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b)));
 
         Ok(prev_sample)
     }
+
     fn timesteps(&self) -> &[i64] {
         &self.timesteps
     }
-
 }
 
 pub struct ImageService {
@@ -372,47 +374,56 @@ impl ImageService {
 
     fn encode_prompt(&self, prompt: &str, negative_prompt: &str) -> Result<Array3<f32>> {
         println!("\nEncoding positive prompt tokens...");
+        
         let tokens = self.tokenizer.encode(prompt, true)
             .map_err(|e| NFTError::ProcessingError(format!("Tokenization failed: {:?}", e)))?;
         
-        println!("\nEncoding negative prompt tokens...");
         let neg_tokens = self.tokenizer.encode(negative_prompt, true)
             .map_err(|e| NFTError::ProcessingError(format!("Negative tokenization failed: {:?}", e)))?;
     
-        let token_ids = tokens.get_ids();
-        let neg_token_ids = neg_tokens.get_ids();
-    
-        // Debug prints
-        println!("\nToken details:");
-        println!("Positive tokens: {:?}", &token_ids[..token_ids.len().min(10)]);  // First 10 tokens
-        println!("Attention mask: {:?}", tokens.get_attention_mask()[..10].to_vec());
-        println!("Negative tokens: {:?}", &neg_token_ids[..neg_token_ids.len().min(10)]);
-    
-        // Rest of your encoding function...
+        // Create padded arrays of the correct length
         let mut input_ids = vec![0i32; MAX_TEXT_LENGTH * 2];
+        
+        // Copy positive tokens with padding to max length
+        let token_ids = tokens.get_ids();
         let token_len = token_ids.len().min(MAX_TEXT_LENGTH);
-        let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
-    
         input_ids[..token_len].copy_from_slice(
             &token_ids[..token_len]
                 .iter()
                 .map(|&x| x as i32)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
         );
+        
+        // Fill rest with padding token (49407 is <|endoftext|>)
+        if token_len < MAX_TEXT_LENGTH {
+            input_ids[token_len..MAX_TEXT_LENGTH].fill(49407);
+        }
+        
+        // Do the same for negative tokens
+        let neg_token_ids = neg_tokens.get_ids();
+        let neg_token_len = neg_token_ids.len().min(MAX_TEXT_LENGTH);
         input_ids[MAX_TEXT_LENGTH..MAX_TEXT_LENGTH + neg_token_len].copy_from_slice(
             &neg_token_ids[..neg_token_len]
                 .iter()
                 .map(|&x| x as i32)
-                .collect::<Vec<_>>(),
+                .collect::<Vec<_>>()
         );
+        
+        // Fill rest with padding token
+        if neg_token_len < MAX_TEXT_LENGTH {
+            input_ids[MAX_TEXT_LENGTH + neg_token_len..MAX_TEXT_LENGTH * 2].fill(49407);
+        }
     
-        // Create and verify input tensor shape
+        println!("\nToken details:");
+        println!("Positive tokens: {:?}", &token_ids[..token_ids.len().min(10)]);
+        println!("Attention mask: {:?}", tokens.get_attention_mask()[..10].to_vec());
+        println!("Negative tokens: {:?}", &neg_token_ids[..neg_token_ids.len().min(10)]);
+    
         let input_tensor = ndarray::Array2::from_shape_vec((2, MAX_TEXT_LENGTH), input_ids)
             .map_err(|e| NFTError::ProcessingError(format!("Failed to create input tensor: {:?}", e)))?;
-        
+    
         println!("\nInput tensor shape: {:?}", input_tensor.shape());
     
-        // Proceed with text encoder inference...
         let input_tensor_dyn = input_tensor.into_dyn();
         let binding = CowArray::from(&input_tensor_dyn);
         let input = Value::from_array(self.text_encoder.allocator(), &binding)
