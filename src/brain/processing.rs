@@ -159,20 +159,50 @@ impl ImageProcessor {
     }
 }
 
+
 impl ImageGenerationParams {
     fn into_generation_parameters(self) -> GenerationParameters {
+        // Map style vector values to descriptive terms
+        let intensity = match self.style_vector[0] {
+            x if x > 0.7 => "highly intense",
+            x if x > 0.4 => "vibrant",
+            _ => "subtle"
+        };
+        
+        let neon = match self.style_vector[1] {
+            x if x > 0.7 => "bright neon lights everywhere",
+            x if x > 0.4 => "neon signs",
+            _ => "dim neon accents"
+        };
+        
+        let decay = match self.style_vector[2] {
+            x if x > 0.7 => "heavily decaying",
+            x if x > 0.4 => "weathered",
+            _ => "aging"
+        };
+        
+        let tech = match self.style_vector[3] {
+            x if x > 0.7 => "extremely high-tech",
+            x if x > 0.4 => "advanced technology",
+            _ => "modern technology"
+        };
+    
         GenerationParameters {
             prompt: format!(
-                "A cyberpunk scene with intensity {}, neon glow {}, urban decay {}, tech complexity {}",
-                self.style_vector[0],
-                self.style_vector[1],
-                self.style_vector[2],
-                self.style_vector[3]
+                "cyberpunk city street at night, {intensity}, with {neon}, {decay} urban environment, {tech}, detailed, high quality, sharp focus",
+                intensity=intensity,
+                neon=neon,
+                decay=decay,
+                tech=tech
             ),
-            negative_prompt: Some("blurry, low quality, distorted".to_string()),
+            negative_prompt: Some(
+                "ugly, blurry, bad art, deformed, poorly drawn, bad anatomy, wrong anatomy, \
+                extra limb, missing limb, floating limbs, disconnected limbs, mutation, mutated, \
+                extra fingers, missing fingers, too many fingers, low quality, distorted".to_string()
+            ),
             width: 512,
             height: 512,
-            num_inference_steps: 25,
+            num_inference_steps: 20,  // Increased from 25 for better quality
             guidance_scale: 7.5,
             seed: Some(rand::random())
         }

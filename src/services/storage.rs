@@ -30,20 +30,20 @@ impl StorageService {
     }
 
     // Save NFT metadata
-    pub fn save_metadata(&self, nft: &NFT) -> Result<PathBuf> {
-        let filename = format!(
-            "{}_metadata.json",
-            nft.name.to_lowercase().replace(" ", "_")
-        );
-        let path = self.config.metadata_dir.join(filename);
-
-        let metadata_json =
-            serde_json::to_string_pretty(nft).map_err(|e| NFTError::SerializationError(e))?;
-
-        fs::write(&path, metadata_json).map_err(|e| NFTError::FileSystemError(e))?;
-
-        Ok(path)
-    }
+   // pub fn save_metadata(&self, nft: &NFT) -> Result<PathBuf> {
+   //     let filename = format!(
+   //         "{}_metadata.json",
+   //         nft.name.to_lowercase().replace(" ", "_")
+   //     );
+   //     let path = self.config.metadata_dir.join(filename);
+//
+   //     let metadata_json =
+   //         serde_json::to_string_pretty(nft).map_err(|e| NFTError::SerializationError(e))?;
+//
+   //     fs::write(&path, metadata_json).map_err(|e| NFTError::FileSystemError(e))?;
+//
+   //     Ok(path)
+   // }
 
     // Create temporary file
     pub fn create_temp_file(&self, prefix: &str) -> Result<PathBuf> {
